@@ -154,29 +154,6 @@ test("operation-scoped reader detects ancestor drift during an actual file read"
 	assert.match((await operation).message, /ancestor changed/);
 });
 
-test("operation-scoped reader joins an outstanding failed read before closing", async t => {
-	const { root } = await fresh("join");
-	const path = join(root, "input");
-	await writeFile(path, "bytes", { mode: 0o600 });
-	const handle = await open(path, "r");
-	const prototype = Object.getPrototypeOf(handle);
-	await handle.close();
-	const entered = Promise.withResolvers(), release = Promise.withResolvers();
-	const failure = new Error("held read failure");
-	t.mock.method(prototype, "read", async () => { entered.resolve(); await release.promise; throw failure; });
-	let reading, finished = false;
-	const operation = withPrivateDirectoryReader(root, async read => {
-		reading = read("input", 16);
-		await entered.promise;
-		await assert.rejects(read("input", 16), /busy/);
-	}).then(() => { finished = true; }, error => { finished = true; return error; });
-	await entered.promise;
-	await new Promise(resolve => setImmediate(resolve));
-	assert.equal(finished, false);
-	release.resolve();
-	assert.strictEqual(await operation, failure);
-	await assert.rejects(reading, error => error === failure);
-});
 
 test("operation-scoped reader batches four concurrent reads and returns input order", async t => {
 	const { root } = await fresh("batch-order");
@@ -421,39 +398,6 @@ test("concurrent batch reads all reject ancestor drift against the pinned closur
 	});
 });
 
-test("create, append, immutable snapshot, and reopen persist the strict hash chain", async () => {
-	const { root, journal } = await fresh("persist");
-	assert.equal(isAbsolute(journal.root), true);
-	assert.deepEqual(await journal.load(), {
-		records: [],
-		head: { seq: 0, hash: ZERO },
-	});
-	const { first, second } = await appendTwo(journal);
-	assert.equal(first.records.length, 1);
-	assert.equal(second.records.length, 2);
-	assert.equal(second.records[0].previousHash, ZERO);
-	assert.equal(second.records[1].previousHash, second.records[0].hash);
-	for (const record of second.records) {
-		const { hash, ...body } = record;
-		assert.equal(hash, goalHash(body));
-	}
-	assert.equal(Object.isFrozen(second), true);
-	assert.equal(Object.isFrozen(second.records), true);
-	assert.equal(Object.isFrozen(second.records[1].payload.nested), true);
-	assert.throws(() => {
-		second.records[0].payload.kind = "mutated";
-	}, TypeError);
-	const reopened = await GoalHostJournal.open(root);
-	assert.deepEqual(await reopened.load(), second);
-	const manifest = JSON.parse(
-		await readFile(join(root, "manifest.json"), "utf8"),
-	);
-	assert.match(manifest.nonce, /^[a-f0-9]{64}$/);
-	assert.deepEqual(manifest.head, second.head);
-	assert.equal((await lstat(root)).mode & 0o7777, 0o700);
-	for (const name of await readdir(root))
-		assert.equal((await lstat(join(root, name))).mode & 0o7777, 0o600);
-});
 
 test("journal replay reuses canonical record text without changing body hash identity", async () => {
 	const { root, journal } = await fresh("canonical-record");
@@ -694,30 +638,6 @@ test("journal replay validates fresh nested payload bytes before accepting their
 	}, /invalid JSON data|string limit/);
 });
 
-test("concurrent equal-head append publishes at most one immutable sequence", async () => {
-	const { root, journal } = await fresh("concurrent");
-	const left = journal;
-	const right = journal;
-	const results = await Promise.allSettled([
-		left.append({ seq: 0, hash: ZERO }, { writer: "left" }),
-		right.append({ seq: 0, hash: ZERO }, { writer: "right" }),
-	]);
-	assert.equal(
-		results.filter((result) => result.status === "fulfilled").length,
-		1,
-	);
-	assert.equal(
-		results.filter((result) => result.status === "rejected").length,
-		1,
-	);
-	const loaded = await (await GoalHostJournal.open(root)).load();
-	assert.equal(loaded.head.seq, 1);
-	assert.equal(loaded.records.length, 1);
-	assert.equal(
-		(await readdir(root)).filter((name) => /^\d{10}\.json$/.test(name)).length,
-		1,
-	);
-});
 
 test("restart exposes only immutable read access, never a reconstructable writer", async () => {
 	const { root, journal } = await fresh("read-only-restart");

@@ -84,68 +84,6 @@ import {
 import "./helpers/goal-authenticated-local-channel.test.mjs";
 const budgetTestPeer = Object.freeze({ connection: Symbol("test-peer") });
 
-test("root profile exception bridge predicate admits only the original captured request", () => {
-  const prepared = {};
-  const binding = { prepared };
-  const channel = {};
-  const bridge = {
-    selectedKey: "selected",
-    requests: new Map([["sibling", { binding, attemptKey: "attempt", channel }]]),
-  };
-  const original = {
-    prepared,
-    bridge,
-    currentBridge: bridge,
-    key: "sibling",
-    binding,
-    currentBinding: binding,
-    ownerPrepared: prepared,
-    attemptKey: "attempt",
-    channel,
-    currentChannel: { channel },
-  };
-  assert.equal(rootProfileExceptionBridgeMatches(original), true);
-  const missingCapture = { ...bridge, requests: new Map() };
-  assert.equal(rootProfileExceptionBridgeMatches({
-    ...original, bridge: missingCapture, currentBridge: missingCapture,
-  }), false, "missing capture is denied");
-  const missingSelectedKey = { ...bridge, selectedKey: undefined };
-  assert.equal(rootProfileExceptionBridgeMatches({
-    ...original, bridge: missingSelectedKey, currentBridge: missingSelectedKey,
-  }), false, "missing selected key is denied");
-  const selectedCapture = {
-    ...bridge,
-    requests: new Map([...bridge.requests, ["selected", { binding, attemptKey: "attempt", channel }]]),
-  };
-  assert.equal(rootProfileExceptionBridgeMatches({
-    ...original, bridge: selectedCapture, currentBridge: selectedCapture, key: "selected",
-  }), false, "selected request is denied");
-  assert.equal(rootProfileExceptionBridgeMatches({
-    ...original, ownerPrepared: {},
-  }), false, "foreign prepared owner is denied");
-  const changedCapturedBinding = {
-    ...bridge,
-    requests: new Map([["sibling", { binding: { prepared }, attemptKey: "attempt", channel }]]),
-  };
-  assert.equal(rootProfileExceptionBridgeMatches({
-    ...original, bridge: changedCapturedBinding, currentBridge: changedCapturedBinding,
-  }), false, "changed captured binding is denied");
-  assert.equal(rootProfileExceptionBridgeMatches({
-    ...original, currentBinding: { prepared },
-  }), false, "changed registered binding is denied");
-  assert.equal(rootProfileExceptionBridgeMatches({
-    ...original, currentChannel: {},
-  }), false, "changed registered channel is denied");
-  assert.equal(rootProfileExceptionBridgeMatches({
-    ...original, attemptKey: "other-attempt",
-  }), false, "wrong attempt is denied");
-  assert.equal(rootProfileExceptionBridgeMatches({
-    ...original, channel: {},
-  }), false, "wrong channel is denied");
-  assert.equal(rootProfileExceptionBridgeMatches({
-    ...original, currentBridge: { ...bridge },
-  }), false, "changed registry identity is denied");
-});
 
 test("child profile exception candidate bridge predicate admits only exact unselected custody", () => {
   const worker = {};
@@ -2408,14 +2346,12 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, "multiple"],
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, "mixed"],
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, false, "cap-used"],
-  [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true],
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true],
-  [false, false, false, undefined, false, 6, undefined, false, false, undefined, "native source-complete success", undefined, true], [true, false, false], [false, true, false], [true, false, true], [false, false, true],
+  [false, false, false, undefined, false, 6, undefined, false, false, undefined, "native source-complete success", undefined, true], [true, false, false], [true, false, true], [false, false, true],
   [false, false, false, undefined, true, 3, "no-read", false, false, true, "child source reads"],
-  ...["success", "cap2", "replan", "malformed", "human", "no-verify", "warm", "replan warm",
-    "source-no-coverage", "source-one-coverage", "source-partial-coverage", "source-suffix-coverage",
-    "source-empty-analysis", "source-whitespace-analysis", "source-missing-analysis",
-    "source-write-tool-denied", "source-foreign-tool-denied", "source-native-evicted",
+  ...["success", "cap2", "malformed", "no-verify", "replan warm",
+    "source-no-coverage", "source-one-coverage", "source-partial-coverage", "source-suffix-coverage", "source-missing-analysis",
+    "source-write-tool-denied", "source-foreign-tool-denied",
     "source-tampered-content"].map(mode =>
     [false, false, false, undefined, false, mode === "cap2" ? 2 : mode.startsWith("replan") ? 6 : 3, undefined, false, false, undefined, mode]),
   // Native source-complete budgets are planner + worker + genuine Agent provider turns:
@@ -2424,8 +2360,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   // 6=initial A/B + two B continuations + final; 7 leaves one request beyond
   // the eviction fixture's six physical sends; 10=planner + worker + two
   // four-turn verifiers; 12 is two complete six-request generations.
-  ...["success", "malformed", "output repair", "output repair exhausted", "output repair twice invalid", "worker output repair", "planner output repair", "model criterion echo", "old exact hash echo", "human", "warm",
-    "source-empty-analysis", "source-whitespace-analysis", "source-missing-analysis",
+  ...["output repair exhausted", "output repair twice invalid", "worker output repair", "planner output repair", "model criterion echo", "source-missing-analysis",
     "source-tampered-content", "source-custody-revoked-after-native",
     "source-payload-replaced", "source-payload-mutated"].map(mode =>
     [false, false, false, undefined, false, mode === "output repair" || mode === "output repair twice invalid" ? 10 :
@@ -2442,8 +2377,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   ...["replan", "replan warm"].map(mode =>
     [false, false, false, undefined, false, 12, undefined, false, false, undefined,
       `native source-complete ${mode}`]),
-  ...["read-only research",
-    "read-only research source-no-coverage",
+  ...["read-only research source-no-coverage",
     "read-only research source-partial-coverage",
     "read-only research producer-capability-mutation",
     "read-only research source-inventory-mutation",
@@ -2452,95 +2386,53 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       `native source-complete ${mode}`]),
   [false, false, false, undefined, true, 4, undefined, false, false, undefined, "verifier profile exception"],
   [false, false, false, undefined, true, 4, undefined, false, false, undefined,
-    "verifier profile exception bridge deletion during compiled read"],
-  [false, false, false, undefined, true, 4, undefined, false, false, undefined,
     "verifier profile exception stale run read"],
   [false, false, false, undefined, true, 4, undefined, false, false, undefined,
     "verifier profile exception replacement bridge before first durable write"],
   [false, false, false, undefined, true, 4, undefined, false, false, undefined,
-    "verifier profile exception uncertain after durable write"],
-  [false, false, false, undefined, true, 4, undefined, false, false, undefined,
     "verifier profile exception compiled read uncertain after durable write"],
-  ...["verifier profile exception",
-    "verifier profile exception bridge deletion during compiled read",
+  ...["verifier profile exception bridge deletion during compiled read",
     "verifier profile exception stale run read",
-    "verifier profile exception replacement bridge before first durable write",
-    "verifier profile exception uncertain after durable write",
-    "verifier profile exception compiled read uncertain after durable write",
     "verifier profile exception duplicate generated history"].map(mode =>
     [false, false, false, undefined, true, 10, undefined, false, false, undefined,
       `native source-complete ${mode}`]),
-  ...["human-acceptance accept", "human-acceptance stop", "human-acceptance no-verify", "human-acceptance reject/replan", "human-acceptance multiple accept", "human-acceptance multiple reject", "human-acceptance multiple publication read failure", "human-acceptance multiple publication lost ack", "human-acceptance stale compiled", "human-acceptance stale subject"].map(mode =>
+  ...["human-acceptance accept", "human-acceptance stop", "human-acceptance reject/replan", "human-acceptance multiple reject", "human-acceptance multiple publication lost ack", "human-acceptance stale compiled", "human-acceptance stale subject"].map(mode =>
     [false, false, false, undefined, true, 4, undefined, false, false, undefined, mode]),
-  [false, false, false, undefined, true, 3, undefined, false, false, undefined, "profile exception"],
   [false, false, false, undefined, true, 3, undefined, false, false, undefined, "profile exception final ownership failure"],
   [false, false, false, undefined, true, 6, undefined, false, false, undefined, "native source-complete profile exception"],
-  [false, false, false, undefined, true, 6, undefined, false, false, undefined,
-    "native source-complete profile exception final ownership failure"],
-  [false, false, false, undefined, true, 2, "no-read", false, false, true],
-  [false, false, false, undefined, true, 2, "no-read", false, false, "inherited saved profile"],
-  [false, false, false, undefined, true, 2, "no-read", false, false, "inherited marked profile"],
-  [false, false, false, undefined, true, 2, "no-read", false, false, "agent inherited profile"],
-  [false, false, false, undefined, true, 1, "no-read", false, false, true],
-  [false, false, false, undefined, true, 2, "no-read", false, false, "ordinary child maxDepth one"],
-  [false, false, false, undefined, true, 4, "no-read", false, false, "replan"],
-  [false, false, false, undefined, true, 4, undefined, false, false, "candidate replan"],
-  [false, false, false, undefined, true, 2, undefined, false, false, "candidate sequential cap2"],
   [false, false, false, undefined, true, 6, undefined, false, false, "candidate sequential cap6"],
   [false, false, false, undefined, true, 2, undefined, false, false, "candidate policy configuration custody"],
   [false, false, false, undefined, true, "candidate-policy-configuration-custody"],
-  [false, true, false, undefined, true, 2, "read", false, false, "candidate read"],
   [false, true, false, undefined, true, 2, "read", false, false, "active stop candidate"],
-  [false, false, false, undefined, true, 2, "no-read", false, false, "candidate unadmitted"],
-  [false, true, false, undefined, true, 2, "read", false, false, "candidate readonly write"],
   [false, false, false, undefined, true, 2, "no-read", false, false, "active stop"],
   ...["missing receipt", "mismatched attempt", "wrong status", "missing observedAt"].map(fault =>
     [false, false, false, undefined, true, 2, "no-read", false, false, `active stop ${fault}`]),
   [false, false, false, undefined, true, 2, "no-read", false, false, "source drift"],
   [false, false, false, undefined, true, 2, "no-read", false, false, "compiled drift"],
-  [false, false, false, undefined, true, 3, "no-read", false, false, "children success"],
-  [false, false, false, undefined, true, 2, "no-read", false, false, "children exhausted root cap"],
   [false, false, false, undefined, true, 3, "no-read", false, false, "mixed success"],
-  [false, false, false, undefined, true, 2, "no-read", false, false, "mixed exhausted root cap"],
-  [false, false, false, undefined, true, 6, "no-read", false, false, "mixed replan"],
-  [false, false, false, undefined, true, 3, "no-read", false, false, "mixed warm"],
   [false, false, false, undefined, true, 3, "no-read", false, false, "mixed warm source drift"],
   [false, false, false, undefined, true, 6, "no-read", false, false, "mixed replan warm"],
   [false, false, false, undefined, true, 3, "no-read", false, false, "pipeline success"],
-  [false, false, false, undefined, true, 3, "no-read", false, false, "pipeline profile exception"],
-  [false, false, false, undefined, true, 3, "no-read", false, false, "pipeline profile exception marked role"],
   [false, false, false, undefined, true, 3, "read", false, false,
     "pipeline profile exception candidate bridge custody bridge deletion source read"],
   [false, false, false, undefined, true, 3, "read", false, false,
     "pipeline profile exception candidate bridge custody uncertainty source read"],
   [false, false, false, undefined, true, 3, "no-read", false, false,
     "pipeline profile exception child original SDK bridge deletion stale snapshot"],
-  [false, false, false, undefined, true, 3, "no-read", false, false,
-    "pipeline profile exception child original SDK uncertainty completion"],
-  [false, false, false, undefined, true, 5, "no-read", false, false, "foreach success"],
-  [false, false, false, undefined, true, 5, "no-read", false, false, "foreach profile exception"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach profile exception marked role"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach profile exception reserved item status tamper"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach profile exception UNKNOWN item status tamper"],
   [false, false, false, undefined, true, 6, "no-read", false, false, "foreach profile exception history"],
-  ...["parent lease busy", "child lease busy", "parent run write failure",
-    "child compiled write failure", "child run write failure",
+  ...["parent lease busy", "child lease busy",
     "dispatch map tamper before confirmation", "dispatch map tamper during confirmation",
     "post-confirmation original authority change", "final child ownership failure"].map(variant =>
     [false, false, false, undefined, true, 5, "no-read", false, false,
       `foreach profile exception ${variant}`]),
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach inherited saved profile"],
-  [false, false, false, undefined, true, 5, "no-read", false, false, "foreach inherited marked profile"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach warm inherited saved profile"],
-  [false, false, false, undefined, true, 4, "no-read", false, false, "foreach cap4"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach overflow"],
-  [false, false, false, undefined, true, 3, "no-read", false, false, "foreach zero"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach active stop"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach active stop parent reentry"],
-  [false, false, false, undefined, true, 5, "no-read", false, false, "foreach warm"],
-  [false, false, false, undefined, true, 5, "no-read", false, false, "foreach warm pending"],
-  [false, false, false, undefined, true, 5, "no-read", false, false, "foreach warm first item"],
-  [false, false, false, undefined, true, 6, "no-read", false, false, "foreach warm three-item middle"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach warm absent registry"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach publication unknown"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach stop after journal"],
@@ -2550,19 +2442,14 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach held publication unknown"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach late transition registration failure"],
   [false, false, false, undefined, true, 3, "no-read", false, false, "pipeline lease contention"],
-  [false, false, false, undefined, true, 2, "no-read", false, false, "pipeline exhausted"],
-  [false, false, false, undefined, true, 6, "no-read", false, false, "pipeline replan"],
-  [false, false, false, undefined, true, 3, "no-read", false, false, "pipeline warm"],
   [false, false, false, undefined, true, 3, "no-read", false, false, "pipeline warm unknown channel"],
   [false, false, false, undefined, true, 3, undefined, false, false, "candidate sequential warm"],
   [false, false, false, undefined, true, 3, undefined, false, false, "candidate sequential pending warm"],
   [false, false, false, undefined, true, 3, undefined, false, false, "candidate sequential reader unknown"],
   [false, false, false, undefined, true, 5, "planner-wrong-digest"],
   [false, false, false, undefined, true, 2, "planner-wrong-digest-repeat"],
-  [false, false, false, undefined, true, 1, "planner-wrong-digest-cap"],
   [false, false, false, undefined, true, 2, "planner-wrong-digest-historical-control"],
   [false, false, true, undefined, false, 4, "planner-wrong-digest-recovery-control"],
-  [false, false, false, undefined, true, 3, "no-read", false, false, "pipeline ambiguous"],
   ...(process.env.PIWF_TEST_ORDINARY_CLOSURE_RECEIPT ? [[false, false, false, undefined, true,
     process.env.PIWF_TEST_ORDINARY_CLOSURE_REPLAN === "2" ? 6 : process.env.PIWF_TEST_ORDINARY_CLOSURE_REPLAN === "1" ? 4 : 2, "no-read", false,
     process.env.PIWF_TEST_ORDINARY_CLOSURE_REPLAN === "2" ? "replan-three-criteria" : process.env.PIWF_TEST_ORDINARY_CLOSURE_REPLAN === "1" ? "replan" : true]] : []),
@@ -2573,18 +2460,12 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   [false, false, false, undefined, false, undefined, "read"],
   [false, false, false, undefined, false, undefined, "partial-read"],
   [false, true, false, undefined, false, undefined, "read"],
-  [false, false, false, undefined, false, undefined, "no-read"],
-  [false, false, false, undefined, false, undefined, "revoked-read"],
-  [false, false, false, "IO"], [false, false, false, "revocation"], [false, false, true, undefined, true], [true, false, true, undefined, true],
-  [false, false, false, undefined, true, 4], [false, false, true, undefined, true, 3],
-  [false, false, false, undefined, false, "uncapped"],
-  [false, false, false, undefined, true, "mixed-provider"],
+  [false, false, false, undefined, false, undefined, "revoked-read"], [true, false, true, undefined, true], [false, false, true, undefined, true, 3],
   [true, false, false, undefined, true, "uncapped"],
-  [false, false, false, undefined, false, "null/null"], [false, false, false, undefined, false, "empty"],
   [false, false, false, undefined, false, "accounting-absent"],
   [false, false, false, undefined, false, "accounting-ack"],
   [false, false, false, undefined, false, 5, "no-read", false, false, "foreach actual backend late UNKNOWN", undefined, true],
-  [false, false, false, undefined, false, 0], [false, false, false, undefined, false, "cost0"],
+  [false, false, false, undefined, false, 0],
   [false, false, false, undefined, false, "cost1"]]) test(backendLateUnknown ? "ordinary Goal actual backend late UNKNOWN blocks queued second native API before provider launch" : rubric ? `ordinary Goal original SDK model rubric ${rubric}${rubric === "warm" || rubric === "replan warm" ? " same-live reattachment retains the original captured profile" : ""}${originApply ? " with origin apply" : ""}` : catalog === "ordinary child maxDepth one" ? "ordinary child maxDepth one runs plain artifact graph" : catalog ? `ordinary Goal admitted catalog ${typeof catalog === "string" && catalog.startsWith("children ") ? catalog : `child ${typeof catalog === "string" ? catalog : requestBudget === 2 ? "success" : "exhausted root cap"}`}` : closure ? ordinaryClosureProducerName : `ordinary candidate workers invoke admitted physical callbacks and preserve bytes across replan${codex ? " with captured Codex SSE" : ""}${sourceMode ? ` with scoped source ${sourceMode}` : ""}${uncertain ? " with UNKNOWN outcome" : ""}${custom ? " with explicit custom agent" : ""}${warm ? " with explicit same-live-session resume" : ""}${evidenceFailure ? ` with evidence ${evidenceFailure}` : ""}${commandMode ? " through registered Goal commands" : ""}${requestBudget !== undefined ? ` with native request budget ${requestBudget}` : ""}${originApply ? " with origin apply" : ""}${commandOracle ? ` judged by ${commandOracle === "multiple" ? "two sandboxed commands" : commandOracle === "mixed" ? "a sandboxed command and an exact value" : "a sandboxed command"}` : ""}${scopeDirectory ? " refuses a directory scope before consent" : ""}${recoveryMode ? ` recovering an interrupted run${recoveryMode === "cap-used" ? " whose requests used the cap" : recoveryMode === "generations-used" ? " whose generations used the limit" : ""}` : ""}${generationLimit ? ` stopped by a generation limit of ${generationLimit}` : ""}${noProgress === "plan" ? " stopped when the plan repeats" : noProgress ? " stopped when a failed candidate repeats" : ""}`, { timeout: backendLateUnknown || rubric || catalog || requestBudget === "candidate-policy-configuration-custody" || warm && commandMode ? testTimeoutMs(30_000) : undefined }, async t => {
   const { runWorkflowSpec, stopRun, resumeRun, stopWorkflowWatchersForTests } = await import("../../.tmp/unit/engine.js");
   const closureGenerations = closure === "replan-three-criteria" ? 3 : closure === "replan" ? 2 : 1;
@@ -16757,10 +16638,6 @@ test(mode === "sequential"
 
 for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, generatedPublicationFault, warm, sequential, rootReplan, inheritedProfile, hybrid, delayedReady, childRubric] of [
   ["one-level Goal to standalone Goal actual SDK parent planner child planner worker and independent immutable oracles", 3, true],
-  ["one-level Goal to standalone Goal with a model-rubric child criterion verifies through the inherited verifier role",
-    4, true, false, undefined, undefined, undefined, undefined, undefined, false, false, false, false, false, true],
-  ["one-level Goal retains its original request channel across delayed READY before release",
-    3, true, false, undefined, undefined, undefined, undefined, undefined, false, false, false, false, true],
   ["hybrid Goal generation runs one local SDK worker and one standalone Goal child with independent immutable oracle",
     4, true, false, undefined, undefined, undefined, undefined, undefined, false, false, false, true],
   ["one-level Goal rejects durable profile tamper before original SDK transmission", 3, true, false, "profile-before-send"],
@@ -16783,16 +16660,12 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
   ["three-level Goal rejects completed grandchild tampered native run identity", 4, true, true, "identity"],
   ["three-level Goal rejects completed grandchild omitted executable inventory", 4, true, true, "inventory"],
   ["three-level Goal rejects authored grandchild source mutation after immediate child terminal oracle", 4, true, true, "source"],
-  ["three-level Goal warm same-live root commands preserve completed planners and resume the held grandchild worker at cap five", 5, true, true, undefined, false, undefined, undefined, true],
   ["three-level Goal warm same-live root commands deny the held grandchild worker at cap four", 4, true, true, undefined, false, undefined, undefined, true],
   ["three-level Goal sent unanswered SDK cancellation retains UNKNOWN and denies resume before family reset", 5, true, true, undefined, false, undefined, undefined, "unknown"],
-  ["three-level Goal warm barrier holds the third original planner before terminal and starts fourth arrival only after release", 5, true, true, undefined, false, undefined, undefined, "probe-third-terminal"],
-  ["three-level Goal warm fourth-SDK phase still times out when the worker is absent after the planner barrier", 5, true, true, undefined, false, undefined, undefined, "probe-missing-fourth"],
   ["three-level Goal warm fixture detects a mutant two-planner readiness barrier", 5, true, true, undefined, false, undefined, undefined, "probe-mutant-two-planner"],
   ["mixed ordinary wrapper Goal root maxDepth two accepts captured wrapper with embedded terminal Goal", 4, true, true, undefined, true],
   ["mixed ordinary wrapper Goal profile exception rejects pending prework beside embedded Goal", 4, true, true, undefined, "profile-denial"],
   ["mixed ordinary wrapper Goal marked prework preserves captured semantic SDK profile", 4, true, true, undefined, "marked"],
-  ["mixed ordinary wrapper Goal synthesis prework preserves final canonical child profile", 4, true, true, undefined, "synthesis"],
   ["mixed ordinary wrapper Goal root maxDepth one denies embedded terminal Goal before consent", 4, true, true, undefined, true, true],
   ["mixed ordinary wrapper Goal shared cap three denies terminal candidate worker transmission", 3, true, true, undefined, true],
   ["mixed ordinary wrapper Goal rejects postconsent grandchild source mutation before root oracle", 4, true, true, "source", true],

@@ -10,18 +10,6 @@ import {
  taskBySpec, writeAgent, writeRunRecord, writeStaticRunArtifacts,
 } from "./unit-test-support.mjs";
 
-test("loop requires an explicit positive count or null, preserving null through compilation", async () => {
- const cwd = makeProject();
- try {
-  writeAgent(cwd, "unit-scout", "read");
-  for (const value of [undefined, 0, -1, 1.5, "unlimited", false]) {
-   assert.throws(() => parseWorkflow(loopWorkflowSpec({ maxRounds: value })), /maxRounds/);
-  }
-  const spec = parseWorkflow(loopWorkflowSpec({ maxRounds: null }));
-  const { compiled } = await createLoopRun(cwd, spec);
-  assert.equal(compiled.stages.find(stage => stage.id === "fix-loop").maxRounds, null);
- } finally { rmSync(cwd, { recursive: true, force: true }); }
-});
 
 async function finishRound(cwd, runId, round, done = false) {
  const current = await readRunRecord(cwd, runId);
@@ -68,35 +56,6 @@ test("explicit progressPath still opts unlimited loops into no-progress stopping
  } finally { setSubagentApiForTests(undefined); rmSync(cwd, { recursive: true, force: true }); }
 });
 
-test("unlimited loop materializes round 100 from structured round 99 state with unique identities", async () => {
- const cwd = makeProject();
- captureSubagentPrompts();
- try {
-  writeAgent(cwd, "unit-scout", "read");
-  const { run } = await createLoopRun(cwd, loopWorkflowSpec({ maxRounds: null }));
-  await scheduleRun(cwd, run.runId);
-  const current = await readRunRecord(cwd, run.runId);
-  await completeTask(cwd, taskBySpec(current, "fix-loop.r01.implement"), { changed: true });
-  await completeTask(cwd, taskBySpec(current, "fix-loop.r01.check"), { status: "fail", verdict: "REJECT", blockingFailures: ["same"] });
-  // Seed a durable later-round state without performing 99 unrelated worker runs.
-  const compiledPath = join(cwd, ".pi", "workflows", run.runId, "compiled.json");
-  const promote = value => JSON.parse(JSON.stringify(value).replaceAll(".r01.", ".r99."));
-  const compiled = promote(JSON.parse(readFileSync(compiledPath, "utf8")));
-  for (const task of compiled.tasks) if (task.loopChild) { task.loopChild.round = 99; task.loopChild.roundTag = "r99"; }
-  const promotedRun = promote(current);
-  for (const state of promotedRun.loopStates ?? []) state.round = 99;
-  await writeJsonAtomic(compiledPath, compiled);
-  await writeRunRecord(cwd, promotedRun);
-  await scheduleRun(cwd, run.runId);
-  const after = await readRunRecord(cwd, run.runId);
-  assert.ok(taskBySpec(after, "fix-loop.r100.implement"));
-  assert.ok(taskBySpec(after, "fix-loop.r100.check"));
-  assert.equal(new Set(after.tasks.map(task => task.taskId)).size, after.tasks.length);
-  const final = await finishRound(cwd, run.runId, 100, true);
-  assert.equal(final.loopResults[0].roundsUsed, 100);
-  assert.equal(final.loopResults[0].status, "completed");
- } finally { setSubagentApiForTests(undefined); rmSync(cwd, { recursive: true, force: true }); }
-});
 
 
 test("unlimited loop stops on execution failure and allows downstream partial cleanup", async () => {

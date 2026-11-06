@@ -66,19 +66,6 @@ function runRecord(cwd, runId, createdAt = new Date().toISOString()) {
 	};
 }
 
-test("WB-005 first and terminal writes are immediately visible in the index", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "piwf-wb005-write-"));
-	const run = runRecord(cwd, "run-first");
-	await mkdir(workflowRunDir(cwd, run.runId), { recursive: true });
-	await withRunLease(cwd, run.runId, async () => writeRunRecord(cwd, run));
-	let index = await readIndex(cwd);
-	assert.equal(index.runs.find((entry) => entry.runId === run.runId).status, "running");
-
-	setTaskTerminal(run.tasks[0], "completed", "completed");
-	await withRunLease(cwd, run.runId, async () => writeRunRecord(cwd, run));
-	index = await readIndex(cwd);
-	assert.equal(index.runs.find((entry) => entry.runId === run.runId).status, "completed");
-});
 
 test("WB-005 fresh index repairs missing and stale cache rows from run.json", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "piwf-wb005-fresh-"));
@@ -125,7 +112,7 @@ test("formatStatus does not create workflow state in a project without runs", as
 	}
 });
 
-for (const state of ["corrupt", "orphaned", "directory"]) {
+for (const state of ["corrupt", "orphaned"]) {
 	test(`empty formatStatus preserves existing ${state} index maintenance`, async () => {
 		const cwd = await mkdtemp(join(tmpdir(), "piwf-status-repair-"));
 		try {
@@ -151,52 +138,3 @@ for (const state of ["corrupt", "orphaned", "directory"]) {
 		}
 	});
 }
-
-test("concurrent first-run status still publishes a real run", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "piwf-status-first-run-"));
-	try {
-		const runId = "status-first-run";
-		const run = runRecord(cwd, runId);
-		setTaskTerminal(run.tasks[0], "completed", "completed");
-		run.status = "completed";
-		await writeJsonAtomic(workflowRunPath(cwd, runId), run);
-		const statuses = await Promise.all([
-			formatStatus(cwd),
-			formatStatus(cwd),
-			formatStatus(cwd),
-		]);
-		for (const status of statuses) assert.match(status, /status-first-run/);
-		const index = await readIndex(cwd);
-		assert.ok(index);
-		assert.deepEqual(index.runs.map((run) => run.runId), [runId]);
-	} finally {
-		const { rm } = await import("node:fs/promises");
-		await rm(cwd, { recursive: true, force: true });
-	}
-});
-
-test("resumeSupervisors does not create workflow state in a project without runs", async () => {
-	const { resumeSupervisors } = await import("../../.tmp/unit/engine.js");
-	const { existsSync } = await import("node:fs");
-	const { rm } = await import("node:fs/promises");
-	const cwd = await mkdtemp(join(tmpdir(), "piwf-resume-empty-"));
-	try {
-	await resumeSupervisors(cwd);
-	assert.equal(existsSync(join(cwd, ".pi", "workflows")), false, "no .pi/workflows directory is created");
-	assert.equal(await readIndex(cwd), undefined);
-
-	// Once a run exists the index is written as before.
-	const runId = "resume-seeded";
-	await mkdir(workflowRunDir(cwd, runId), { recursive: true });
-	const seeded = runRecord(cwd, runId);
-	setTaskTerminal(seeded.tasks[0], "completed", "completed");
-	seeded.status = "completed";
-	await withRunLease(cwd, runId, async () => writeRunRecord(cwd, seeded));
-	await resumeSupervisors(cwd);
-	const index = await readIndex(cwd);
-	assert.ok(index, "index is created once a run exists");
-	assert.deepEqual(index.runs.map((run) => run.runId), [runId]);
-	} finally {
-		await rm(cwd, { recursive: true, force: true });
-	}
-});

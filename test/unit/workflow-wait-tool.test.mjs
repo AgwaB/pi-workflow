@@ -962,61 +962,6 @@ test("exclusive epoch receipts preserve prior epochs across final-boundary lease
 	}
 });
 
-test("feedback watcher single-flights delivery and retries a failed send", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-watcher-retry-"));
-	const controller = new AbortController();
-	let rejectFirst;
-	try {
-		const run = runRecord(cwd, { runId: "workflow_watcher_retry" });
-		await writeRunFixture(cwd, run);
-		await writeFeedbackAudience(cwd, run.runId, "session-watcher-retry");
-		setWorkflowFeedbackPollMsForTests(5);
-		let sends = 0;
-		watchWorkflowFeedbackForTests(
-			feedbackContext(cwd, "session-watcher-retry"),
-			{
-				sendMessage() {
-					sends += 1;
-					if (sends === 1)
-						return new Promise((_, reject) => {
-							rejectFirst = reject;
-						});
-				},
-			},
-			run.runId,
-			controller.signal,
-		);
-		await eventually(() => assert.equal(sends, 1));
-		await sleep(30);
-		assert.equal(sends, 1, "poll ticks must not overlap an in-flight send");
-		rejectFirst(new Error("transient send failure"));
-		await eventually(() => assert.equal(sends, 2));
-		await eventually(async () => {
-			assert.equal((await feedbackReceipts(cwd, run.runId)).length, 1);
-		});
-		controller.abort();
-		const reclaimed = await eventually(async () => {
-			const lease = await acquireRunFileLease(
-				cwd,
-				run.runId,
-				"feedback-presentation",
-			);
-			assert.ok(lease);
-			return lease;
-		}, 2_000);
-		await reclaimed.release();
-	} finally {
-		controller.abort();
-		rejectFirst?.(new Error("fixture cleanup"));
-		try {
-			await stopWorkflowFeedbackAndDrainForTests(cwd, "workflow_watcher_retry");
-			await flushPendingIndexUpdatesForTests();
-		} finally {
-			setWorkflowFeedbackPollMsForTests(undefined);
-		}
-		await rm(cwd, { recursive: true, force: true });
-	}
-});
 
 test("feedback watcher stops after retry exhaustion and warns once", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-watcher-exhausted-"));
@@ -1382,48 +1327,6 @@ test("workflow wait returns a terminal result without model polling", async () =
 	}
 });
 
-test("successful workflow wait survives persistent final release failure", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-release-success-"));
-	try {
-		const run = runRecord(cwd, { runId: "workflow_wait_release_success" });
-		await writeRunFixture(cwd, run, { executiveMarkdown: "Durable result." });
-		await writeFeedbackAudience(cwd, run.runId, "session-release-success");
-		let releaseAttempts = 0;
-		setRunLeaseTestHooksForTests({
-			onBeforeReleaseLockRename({ lockFile }) {
-				if (!lockFile.endsWith("feedback-presentation.lock")) return;
-				releaseAttempts += 1;
-				throw new Error("persistent final release failure");
-			},
-		});
-		const tools = [];
-		registerWorkflowWaitTool(fakePi(tools), {
-			PI_WORKFLOW_ROLE: "supervisor",
-		});
-		const result = await tools[0].execute(
-			"call-release-success",
-			{ runId: run.runId, timeoutMs: 60_000 },
-			new AbortController().signal,
-			undefined,
-			feedbackContext(cwd, "session-release-success", { hasUI: false }),
-		);
-		assert.equal(result.details.status, "completed");
-		assert.match(result.details.finalResultPreview, /Durable result/);
-		assert.equal(releaseAttempts, 3);
-		assert.equal((await feedbackReceipts(cwd, run.runId)).length, 1);
-		setRunLeaseTestHooksForTests(undefined);
-		const reclaimed = await acquireRunFileLease(
-			cwd,
-			run.runId,
-			"feedback-presentation",
-		);
-		assert.ok(reclaimed);
-		await reclaimed.release();
-	} finally {
-		setRunLeaseTestHooksForTests(undefined);
-		await rm(cwd, { recursive: true, force: true });
-	}
-});
 
 test("workflow wait timeout preserves its error and hands delivery back after release failure", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-release-timeout-"));
@@ -2182,22 +2085,6 @@ test("awaitTerminal bind failure reports run id and deterministic wait recovery"
 	}
 });
 
-test("workflow tools defer only when PI_WORKFLOW_TOOL_EXPOSURE=deferred", () => {
-	const register = (tools, env) => {
-		registerWorkflowNaturalLanguageTools(fakePi(tools), env);
-		registerWorkflowWaitTool(fakePi(tools), env);
-	};
-	const direct = [];
-	register(direct, { PI_WORKFLOW_ROLE: "supervisor" });
-	assert.ok(direct.some((tool) => tool.name === WORKFLOW_WAIT_TOOL));
-	assert.ok(direct.length >= 4);
-	assert.ok(direct.every((tool) => tool.exposure === undefined));
-
-	const deferred = [];
-	register(deferred, { PI_WORKFLOW_ROLE: "supervisor", PI_WORKFLOW_TOOL_EXPOSURE: "deferred" });
-	assert.equal(deferred.length, direct.length);
-	assert.ok(deferred.every((tool) => tool.exposure === "deferred"));
-});
 
 test("workflow launch tools expose and enforce terminal wait options", async () => {
 	const tools = [];

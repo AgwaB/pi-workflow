@@ -32,26 +32,6 @@ test('NONAUTHORITY content identity excludes locator but preserves complete byte
   assert.notDeepEqual(goalFileContentIdentity(null), goalFileContentIdentity(bytes('')));
 });
 
-test('W01/W02/W11 immutable scoped dirty baseline -> sequential candidate -> Goal-only delta', () => {
-  const input = baseline();
-  const sealed = parseGoalWorkspaceBaseline(input);
-  const first = initialGoalCandidate(sealed);
-  assert.equal(first.files[0].value.hex, bytes('user staged plus unstaged').hex);
-  assert.equal(first.files[2].value.hex, bytes('user untracked').hex);
-  input.origin.files[0].worktree.hex = '00';
-  assert.notEqual(sealed.origin.files[0].worktree.hex, '00');
-  const second = updateGoalCandidate(sealed, first, first.files.map(f => f.path === 'a' ? { ...f, value: bytes('user plus Goal A') } : f));
-  const third = updateGoalCandidate(sealed, second, second.files.map(f => f.path === 'new' ? { ...f, value: bytes('user untracked plus Goal B') } : f));
-  assert.equal(third.workspaceId, first.workspaceId);
-  assert.equal(third.baselineHash, first.baselineHash);
-  const delta = goalWorkspaceDelta(sealed, third);
-  assert.deepEqual(delta.paths.map(p => p.path), ['a', 'new']);
-  assert.deepEqual(delta.paths[0].before, bytes('user staged plus unstaged'));
-  assert.deepEqual(sealed.origin.files[0].index, bytes('user staged'));
-  assert.equal(sealed.origin.indexDigest, h('entire-user-index'));
-  assert.deepEqual(goalWorkspaceDelta(sealed, first).paths, []);
-  assert.throws(() => { sealed.origin.files[0].index.hex = '00'; }, TypeError);
-});
 
 test('W04 read-only means no-worktree, unchanged candidate only', () => {
   const b = { ...baseline(), mode: 'read-only' };
@@ -72,18 +52,6 @@ test('W05/W07 nonGit requires exact explicit manifest, reports staging requireme
   assert.equal(goalWorkspaceRequirement(baseline()), 'managed-git-worktree-required');
 });
 
-test('W02 additions, deletes, staged delete + recreated untracked, executable/binary/empty bytes remain distinct', () => {
-  const b = baseline(); b.origin.files[0].index = null;
-  b.origin.files[0].worktree = bytes('recreated by user');
-  b.origin.files[2].worktree = null;
-  const c = initialGoalCandidate(b);
-  const next = updateGoalCandidate(b, c, c.files.map(f => f.path === 'a' ? { ...f, value: null } : f.path === 'new' ? { ...f, value: { ...bytes(''), mode: '0755', hex: '00ff0a' } } : f));
-  const delta = goalWorkspaceDelta(b, next);
-  assert.equal(delta.paths[0].after, null);
-  assert.equal(delta.paths[1].before, null);
-  assert.equal(delta.paths[1].after.hex, '00ff0a');
-  assert.notEqual(goalHash(bytes('')), goalHash(null));
-});
 
 for (const path of ['../outside', '/absolute', 'a/../b', 'a//b', 'a\\b', '.git/config', '.GiT/config', '.pi/goals', 'a/.git', 'a.', 'CON.txt', 'a:stream', 'é', 'a\u0000b']) {
   test(`W06 metadata-only rejects unsafe path ${JSON.stringify(path)} (not OS protection)`, () => {

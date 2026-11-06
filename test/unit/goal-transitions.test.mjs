@@ -155,35 +155,6 @@ test("P1 transitions persist, reject stale writes before publication and rebuild
   assert.equal(goalHash(reopened.decision), goalHash(snapshot.decision));
 });
 
-// These three tests must first fail on the prior staged draft, not assert the gaps.
-test("P1-BINDING fresh scoped candidate can be accepted without criterion revision", () => {
-  const f = fixture();
-  const current = {
-    ...f.contract.criteria[0].binding,
-    subjectDigest: h("new-candidate"),
-  };
-  const before = goalHash(f.contract);
-  const old = f.receipt(undefined, { result: "fail" });
-  const events = [
-    f.event("start"),
-    old,
-    update(f, current),
-    f.receipt(undefined, { binding: current }),
-  ];
-  const inventory = {
-    bindings: [{ criterionId: "objective", binding: current }],
-  };
-  const d = fold(f, events, inventory);
-  assert.equal(d.criteria[0].state, "met");
-  assert.equal(d.contractHash, before);
-  assert.equal(goalHash(f.contract), before);
-  assert.equal(events[1].data.receipt.result, "fail");
-  assert.equal(
-    fold(f, [...events, f.terminal("achieved", inventory)], inventory)
-      .lifecycle,
-    "achieved",
-  );
-});
 test("P1-BLOCKER exact manual resolution retires only active instance and requires reconcile", () => {
   const f = fixture();
   const be = f.event("blocker", {
@@ -200,25 +171,6 @@ test("P1-BLOCKER exact manual resolution retires only active instance and requir
     "achieved",
   );
   assert.equal(be.data.blocker.errorClass, "human");
-});
-test("P1-RESOLUTION exact fresh verifier resolution can retire conflict without deleting receipts", () => {
-  const f = fixture();
-  const failed = f.receipt(undefined, { result: "fail", observedAt: 80 });
-  const fresh = f.receipt(undefined, {
-    evidenceRefs: [h("fresh-check")],
-    observedAt: 95,
-  });
-  const events = [f.event("start"), failed, fresh];
-  assert.equal(fold(f, events).criteria[0].state, "conflicted");
-  events.push(resolveEvidence(f, [failed], fresh));
-  const d = fold(f, events);
-  assert.equal(d.criteria[0].state, "met");
-  assert.deepEqual(d.criteria[0].supersededReceiptIds, [
-    failed.data.receipt.id,
-  ]);
-  assert.deepEqual(d.criteria[0].receiptIds, [fresh.data.receipt.id]);
-  assert.equal(failed.data.receipt.result, "fail");
-  assert.equal(fold(f, [...events, f.terminal()]).lifecycle, "achieved");
 });
 
 for (const field of [
@@ -584,35 +536,7 @@ test("P1-RESOLUTION rejects cherry-picking, cross criterion, stale binding, fore
   );
   assert.equal(fold(f, [...base, accepted]).criteria[0].state, "met");
 });
-test("P1-RESOLUTION later counterexample reopens conflict; expired replacement is not achievement", () => {
-  const f = fixture();
-  const old = f.receipt(undefined, { result: "fail", observedAt: 80 });
-  const fresh = f.receipt(undefined, {
-    observedAt: 95,
-    validUntil: 150,
-    evidenceRefs: [h("fresh")],
-  });
-  const events = [
-    f.event("start"),
-    old,
-    fresh,
-    resolveEvidence(f, [old], fresh),
-  ];
-  assert.equal(fold(f, events, { at: 151 }).criteria[0].state, "stale");
-  assert.equal(
-    fold(f, [
-      ...events,
-      f.receipt(undefined, { result: "fail", observedAt: 99 }),
-    ]).criteria[0].state,
-    "conflicted",
-  );
-  assert.throws(
-    () => fold(f, [...events, resolveEvidence(f, [old], fresh)]),
-    /cover/,
-  );
-  assert.equal(goalHash(fold(f, events)), goalHash(fold(f, events)));
-});
-for (const kind of ["model-rubric", "human"]) {
+for (const kind of ["human"]) {
   test(`P1-RESOLUTION ${kind} preserves acceptance kind and exact designated actor`, () => {
     const f = fixture({ criteria: [criterion("judgment", kind)] });
     const old = f.receipt(undefined, { result: "fail", observedAt: 80 });

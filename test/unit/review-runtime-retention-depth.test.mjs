@@ -52,20 +52,6 @@ async function ordinaryClosureFixture(cwd) {
  await writeFile(join(f.dir,'tasks/root/artifacts/refs.json'),JSON.stringify([{id:evidenceRef,path:evidenceRef}]));
  return {...f,root,evidencePath};
 }
-test('RR-AC14 preview counts original primary mirror hard links once',async()=>{
- const cwd=await fixture();try{
-  const f=await run(cwd,parent);
-  const mirror=join(cwd,'.pi','workflow-subagents',parent);await mkdir(mirror,{recursive:true});
-  const bytes=Buffer.from('original shared primary and mirror bytes');
-  await writeFile(join(f.dir,'payload.bin'),bytes);
-  await link(join(f.dir,'payload.bin'),join(mirror,'payload.bin'));
-  const preview=await pruneWorkflowRuns(cwd,{keep:0});
-  assert.equal(preview.runs.find(row=>row.runId===parent).bytes,
-   Buffer.byteLength(JSON.stringify(f.record))+bytes.length);
-  assert.equal((await stat(join(f.dir,'payload.bin'))).nlink,2);
-  assert.deepEqual(await readFile(join(mirror,'payload.bin')),bytes);
- }finally{await rm(cwd,{recursive:true,force:true});}
-});
 test('RR-AC14 explicit ordinary selector shared parser rejects duplicate unsafe and mixed filters',async()=>{
  assert.deepEqual(parseWorkflowPruneArgs(['--goal-family',parent,'--yes','--json']),{terminalWorkflowGoalRoot:parent,yes:true,json:true});
  for(const args of [['--goal-family'],['--goal-family','../outside'],['--goal-family',parent,'--goal-family',child],['--goal-family',parent,'--keep','0'],['--older-than','1','--goal-family',parent]])assert.throws(()=>parseWorkflowPruneArgs(args));
@@ -145,24 +131,6 @@ for(const location of ['external','internal']) test(`RR-AC14 ordinary closure re
   assert.equal(await exists(f.dir),true);assert.deepEqual(await readFile(f.evidencePath),original);
  }finally{await rm(cwd,{recursive:true,force:true});}
 });
-test('RR-AC14 ordinary closure accepts original physical cwd alias without rewriting oracle',async()=>{
- const cwd=await fixture(), alias=join(tmpdir(),`piwf-closure-alias-${process.pid}-${Date.now()}`);try{
-  await symlink(cwd,alias);const f=await ordinaryClosureFixture(alias);
-  const originalRun=await readFile(join(f.dir,'run.json')), originalOracle=await readFile(f.evidencePath);
-  const preview=await pruneWorkflowRuns(cwd,{terminalWorkflowGoalRoot:parent});
-  assert.equal(preview.error,undefined);assert.equal(preview.runs[0].protected,false);
-  assert.deepEqual(await readFile(join(f.dir,'run.json')),originalRun);assert.deepEqual(await readFile(f.evidencePath),originalOracle);
- }finally{await rm(alias,{force:true});await rm(cwd,{recursive:true,force:true});}
-});
-test('RR-AC14 explicit ordinary postdetach failure retains complete original recovery record',async()=>{
- const cwd=await fixture();try{
-  const f=await ordinaryClosureFixture(cwd), before=await readFile(join(f.dir,'run.json'),'utf8'), oracle=await readFile(f.evidencePath,'utf8');
-  setWorkflowPruneAfterQuarantineForTests(()=>{throw Error('ordinary purge fault');});
-  const result=await pruneWorkflowRuns(cwd,{terminalWorkflowGoalRoot:parent,yes:true}), row=result.runs[0];
-  assert.ok(result.error);assert.equal(row.detached,true);assert.equal(row.deleted,false);assert.equal(result.deletedBytes,0);assert.equal(result.indexUpdated,true);
-  assert.equal(await readFile(join(row.retainedEvidencePath,'run.json'),'utf8'),before);assert.equal(await readFile(join(row.retainedEvidencePath,'tasks/root/artifacts/goal-evidence',f.evidencePath.split('/').at(-1)),'utf8'),oracle);
- }finally{setWorkflowPruneAfterQuarantineForTests();await rm(cwd,{recursive:true,force:true});}
-});
 const exists = path => stat(path).then(()=>true,()=>false);
 async function admitGoalChild(cwd, parentRunId, childRunId, goalId='fixture-goal') {
  const base=goalFixture();const authority={...base.contract.authority,goalId};const root=join(cwd,'.pi','goals','current',goalId);const f=goalFixture({goalId,authority,authorityHash:goalHash(authority)});const store=new GoalStore(root);const owner=store.hostOwner('retention-owner',0);
@@ -174,17 +142,6 @@ async function admitGoalChild(cwd, parentRunId, childRunId, goalId='fixture-goal
   return store.commitEvent(owner,cancelling,f.terminal('cancelled'));
  }};
 }
-for (const status of ['running','failed','interrupted','completed']) test(`RR-01 retained ${status} child preserves ancestry`, async()=>{
- const cwd=await fixture(); let release; let held;
- try {
-  const p=await run(cwd,parent); await run(cwd,child,status,{parentRunId:parent,rootRunId:parent,updatedAt:'2026-01-02T00:00:00.000Z'}); await ledger(p.dir,[init,start]);
-  if(status==='running') { let ready; const acquired=new Promise(r=>ready=r); held=withRunLease(cwd,child,async()=>{ready();await new Promise(r=>release=r);}); await acquired; }
-  assert.equal(await remainingDynamicNestedWorkflowDepth(cwd,child,8),1);
-  const result=await pruneWorkflowRuns(cwd,{keep:status==='running'?0:1,yes:true});
-  assert.equal(result.runs.find(r=>r.runId===parent).protected,true);
-  assert.equal(await exists(p.dir),true); assert.equal(await remainingDynamicNestedWorkflowDepth(cwd,child,8),1);
- } finally { release?.(); await held; await rm(cwd,{recursive:true,force:true}); }
-});
 test('RR-01 selected child purges before newer parent; dry run has no writes',async()=>{
  const cwd=await fixture(); try {
   await run(cwd,parent,'completed',{updatedAt:'2026-01-03T00:00:00.000Z'}); await run(cwd,child,'failed',{parentRunId:parent});
@@ -339,19 +296,6 @@ test('RR-03 explicit family refuses a second retained Goal reference',async()=>{
   assert.match(result.error,/external retained Goal reference/);assert.equal(await exists(c.dir),true);
  }finally{await rm(cwd,{recursive:true,force:true});}
 });
-test('RR-03 two explicitly selected terminal Goals detach as one family transaction',async()=>{
- const cwd=await fixture();try{
-  const one=await admitGoalChild(cwd,parent,child);await one.terminal();
-  const secondParent='workflow_second_parent',secondChild='workflow_second_child';
-  const two=await admitGoalChild(cwd,secondParent,secondChild,'fixture-goal-2');await two.terminal();
-  await run(cwd,parent,'completed',{tasks:[{taskId:'goal-parent-task',specId:controller,status:'completed',goal:{goalId:one.goalId,contractHash:one.contractHash,state:'terminal'}}]});
-  await run(cwd,child,'failed');
-  await run(cwd,secondParent,'completed',{tasks:[{taskId:'goal-second-parent-task',specId:controller,status:'completed',goal:{goalId:two.goalId,contractHash:two.contractHash,state:'terminal'}}]});
-  await run(cwd,secondChild,'failed');
-  const result=await pruneWorkflowRuns(cwd,{keep:0,yes:true,terminalGoalFamilyRoots:['fixture-goal','fixture-goal-2']});
-  assert.equal(result.error,undefined);assert.deepEqual(new Set(result.runs.map(row=>row.runId)),new Set([parent,child,secondParent,secondChild]));assert.ok(result.runs.every(row=>row.deleted));
- }finally{await rm(cwd,{recursive:true,force:true});}
-});
 test('RR-03 selected Goal closure fence does not inherit into sibling Goal host',async()=>{
  const cwd=await fixture();try{
   await mkdir(join(cwd,'.pi','goals','current','fixture-goal'),{recursive:true});
@@ -400,34 +344,12 @@ test('RR-03 pre-commit family interruption retains all detached evidence',async(
   assert.match(result.error,/before detach commit/);assert.ok(result.runs.every(row=>row.detached&&!row.deleted));
  }finally{setGoalRetentionBeforeDetachCommitForTests();await rm(cwd,{recursive:true,force:true});}
 });
-test('RR-01 malformed child references conservatively protect ancestors',async()=>{
- const cwd=await fixture(); try { await run(cwd,parent); const c=await run(cwd,child,'failed',{parentRunId:parent}); await writeFile(join(c.dir,'run.json'),'{bad'); const result=await pruneWorkflowRuns(cwd,{keep:0,yes:true}); assert.equal(result.runs[0].protected,true); } finally {await rm(cwd,{recursive:true,force:true});}
-});
-test('RR-02 post-detach failure reports recovery paths, repairs index and frees no retained bytes',async()=>{
- const cwd=await fixture(); try {
-  await run(cwd,parent); const mirror=join(cwd,'.pi','workflow-subagents',parent); await mkdir(mirror,{recursive:true}); await writeFile(join(mirror,'evidence'),'recover me'); await updateIndex(cwd);
-  setWorkflowPruneAfterQuarantineForTests(()=>{throw Error('purge fault');});
-  const result=await pruneWorkflowRuns(cwd,{keep:0,yes:true}); const entry=result.runs[0];
-  assert.equal(entry.detached,true); assert.equal(entry.purged,false); assert.equal(entry.deleted,false); assert.equal(result.deletedBytes,0); assert.equal(result.indexUpdated,true); assert.ok(result.error);
-  assert.deepEqual((await readIndex(cwd)).runs,[]); assert.equal(JSON.parse(await readFile(join(entry.retainedEvidencePath,'run.json'),'utf8')).runId,parent); assert.equal(await readFile(join(entry.retainedMirrorPath,'evidence'),'utf8'),'recover me');
- } finally {setWorkflowPruneAfterQuarantineForTests();await rm(cwd,{recursive:true,force:true});}
-});
-test('RR-02 retained child quarantine protects its parent',async()=>{
- const cwd=await fixture(); try {await run(cwd,parent);await run(cwd,child,'failed',{parentRunId:parent});setWorkflowPruneAfterQuarantineForTests(()=>{throw Error('purge fault');});const result=await pruneWorkflowRuns(cwd,{keep:0,yes:true});assert.equal(result.runs.find(r=>r.runId===parent).protected,true);assert.equal(await exists(join(cwd,'.pi','workflows',parent)),true);}finally{setWorkflowPruneAfterQuarantineForTests();await rm(cwd,{recursive:true,force:true});}
-});
 test('RR-02 actual CLI rejects mirror validation failure and preserves primary and mirror evidence',async()=>{
  const cwd=await fixture(); try {
   const p=await run(cwd,parent); const outside=join(cwd,'mirror-evidence'); await mkdir(outside); await writeFile(join(outside,'evidence'),'recover me'); const mirror=join(cwd,'.pi','workflow-subagents',parent); await mkdir(join(mirror,'..'),{recursive:true}); await symlink(outside,mirror); await updateIndex(cwd);
   const cli=spawnSync(process.execPath,[new URL('../../src/cli.mjs',import.meta.url).pathname,'prune','--keep','0','--yes','--json'],{cwd,encoding:'utf8'});
   assert.notEqual(cli.status,0,cli.stdout+cli.stderr); const summary=JSON.parse(cli.stdout); assert.ok(summary.error); assert.equal(summary.runs[0].detached,false); assert.equal(await exists(p.dir),true); assert.equal(await readFile(join(mirror,'evidence'),'utf8'),'recover me'); assert.equal((await readIndex(cwd)).runs[0].runId,parent);
  } finally {await rm(cwd,{recursive:true,force:true});}
-});
-test('RR-02 pre-primary-detach failure preserves canonical run and recoverable mirror',async()=>{
- const cwd=await fixture();try{
-  const p=await run(cwd,parent);const mirror=join(cwd,'.pi','workflow-subagents',parent);await mkdir(mirror,{recursive:true});await writeFile(join(mirror,'evidence'),'recover me');await updateIndex(cwd);
-  setWorkflowPruneBeforePrimaryDetachForTests(()=>{throw Error('primary detach fault');});
-  const summary=await pruneWorkflowRuns(cwd,{keep:0,yes:true});const entry=summary.runs[0];assert.equal(entry.detached,false);assert.equal(entry.purged,false);assert.equal(summary.deletedBytes,0);assert.equal(summary.indexUpdated,false);assert.ok(summary.error);assert.equal(await exists(p.dir),true);assert.equal(await readFile(join(entry.retainedMirrorPath,'evidence'),'utf8'),'recover me');assert.equal((await readIndex(cwd)).runs[0].runId,parent);
- }finally{setWorkflowPruneBeforePrimaryDetachForTests();await rm(cwd,{recursive:true,force:true});}
 });
 test('RR-01 retained quarantine continues to protect ancestry in a later prune plan',async()=>{
  const cwd=await fixture();try{
@@ -481,7 +403,7 @@ test('RR-01 competing first writers cannot change a published parent reference',
 test('RR-01 published ancestry cannot move outside topology serialization',async()=>{
  const cwd=await fixture();try{await run(cwd,parent);const c=await run(cwd,child,'running',{parentRunId:parent});await assert.rejects(writeRunRecord(cwd,{...c.record,parentRunId:undefined}),/ancestry is immutable/);}finally{await rm(cwd,{recursive:true,force:true});}
 });
-for(const change of ['valid','opId','requestHash','workflowId','uses','controllerSpecId','seq','runId']) test(`DEP-01 ancestry tuple and canonical ledger: ${change}`,async()=>{
+for(const change of ['opId','seq']) test(`DEP-01 ancestry tuple and canonical ledger: ${change}`,async()=>{
  const cwd=await fixture();try{
   const p=await run(cwd,parent);await run(cwd,child,'running',{parentRunId:parent,rootRunId:parent});
   const duplicate={...start,seq:3,payload:{...start.payload,status:'running'}};

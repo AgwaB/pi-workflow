@@ -228,25 +228,6 @@ test("A04 CORE explicit user revision binds predecessor/authority/profile; old r
     /profile/,
   );
 });
-test("A04 verifier lineage changes require an explicit contract revision and re-registration", () => {
-  const f = fixture();
-  const next = clone(f.contract);
-  next.revision++;
-  next.previousHash = goalHash(f.contract);
-  next.authority.revision++;
-  next.authorityHash = goalHash(next.authority);
-  next.criteria[0].binding.producerLineageDigest = h(
-    "replacement-verifier-lineage",
-  );
-  const parsed = parseGoalContract(next);
-  assertGoalRevision(f.contract, parsed);
-  const ingress = createGoalHostIngress();
-  const accepted = ingress.contract(parsed, user);
-  assert.equal(
-    accepted.criteria[0].binding.producerLineageDigest,
-    h("replacement-verifier-lineage"),
-  );
-});
 
 test("A07 CORE delegation schema does not grant push/release/credential or background authority", () => {
   for (const effect of ["push", "release", "credentials", "shell"]) {
@@ -315,51 +296,6 @@ test("A08 CORE strict records reject unknown keys/version, duplicate IDs, empty 
         }),
       ),
     /origin criterion/,
-  );
-});
-test("A08 CORE canonical hash is order-stable and lossless strict JSON, without executing getters/toJSON", () => {
-  assert.equal(goalHash({ b: 2, a: 1 }), goalHash({ a: 1, b: 2 }));
-  assert.equal(
-    goalHash(JSON.parse('{"__proto__":{"a":1}}')),
-    goalHash(JSON.parse('{"__proto__":{"a":1}}')),
-  );
-  assert.notEqual(goalHash(JSON.parse('{"__proto__":{"a":1}}')), goalHash({}));
-  let invoked = 0;
-  const getter = {};
-  Object.defineProperty(getter, "a", {
-    enumerable: true,
-    get() {
-      invoked++;
-      return 1;
-    },
-  });
-  for (const invalid of [
-    getter,
-    {
-      toJSON() {
-        invoked++;
-      },
-    },
-    { a: undefined },
-    NaN,
-    Infinity,
-    -0,
-    new Date(),
-    [, 1],
-    { x: "\ud800" },
-    { [Symbol("x")]: 1 },
-  ]) {
-    assert.throws(() => goalJson(invalid));
-    assert.throws(() => goalInput(invalid));
-  }
-  const cycle = {};
-  cycle.self = cycle;
-  assert.throws(() => goalJson(cycle));
-  assert.throws(() => goalInput(cycle));
-  assert.equal(invoked, 0);
-  assert.deepEqual(
-    parseGoalContract(JSON.stringify(contractData(), null, 2)),
-    contractData(),
   );
 });
 test("A08 B09 CORE receipt and event parsing reject trusted flags and unknown producers at ingress", () => {

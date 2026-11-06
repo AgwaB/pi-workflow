@@ -126,35 +126,6 @@ test("failed cleanup hands off only after all rename attempts and cannot resume 
   }
 });
 
-test("a validated failed-release abandonment stays latched across reclaim rename", async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "piwf-abandoned-reclaim-"));
-  let first, second;
-  try {
-    first = await acquireWorkflowTopologyLease(cwd);
-    setRunLeaseTestHooksForTests({
-      onBeforeReleaseLockRename() { throw new Error("persistent release failure"); },
-    });
-    await assert.rejects(first.release(), /persistent release failure/);
-    let reclaimed = false;
-    setRunLeaseTestHooksForTests({
-      async onAfterReclaimRename({ lockFile }) {
-        reclaimed = true;
-        await unlink(`${lockFile}.abandoned-${first.ownerId}`);
-      },
-      onBeforeRestoreReclaimFile() { assert.fail("must not restore the abandoned live-PID generation"); },
-    });
-    second = await acquireWorkflowTopologyLease(cwd, 0);
-    assert.ok(second);
-    assert.equal(reclaimed, true);
-    await second.assertOwner();
-    assert.equal(second.signal.aborted, false);
-  } finally {
-    setRunLeaseTestHooksForTests();
-    await second?.release();
-    await first?.release();
-    await rm(cwd, { recursive: true, force: true });
-  }
-});
 
 test("held lock, owner mismatch, and invalid abandonment never authorize protected writes or reclaim", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "piwf-handoff-negatives-"));

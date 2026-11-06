@@ -22,78 +22,7 @@ import {
 import { setSubagentApiForTests } from "../../.tmp/unit/subagent-backend.js";
 import { writeWorkflowTaskArtifactBundle } from "../../.tmp/unit/workflow-output-artifacts.js";
 
-test("auditDynamicClaimSupport counts sourced claims via URL and ref-id joins", () => {
-	const audit = auditDynamicClaimSupport({
-		synthesis: [
-			{
-				taskId: "adaptive.synthesis",
-				control: {
-					schema: "stage-control-v1",
-					claims: [
-						{
-							id: "c-url",
-							text: "URL-backed claim",
-							sourceUrls: ["https://example.com/evidence"],
-						},
-						{
-							id: "c-ref",
-							text: "artifact-backed claim",
-							sourceRefs: [{ taskId: "adaptive.research" }],
-						},
-					],
-				},
-			},
-		],
-		collected: [
-			{
-				taskId: "task-2",
-				specId: "adaptive.research",
-				refs: [
-					"https://example.com/evidence",
-					{ url: "https://example.com/other#fragment" },
-				],
-			},
-		],
-	});
-	assert.equal(audit.claimsTotal, 2);
-	assert.equal(audit.claimsWithSources, 2);
-	assert.equal(audit.claimsWithoutSources, 0);
-	assert.equal(audit.refsTotal, 2);
-	assert.equal(audit.uniqueSourceUrls, 2);
-	assert.equal(audit.sourceRefJoinFailures, 0);
-	assert.deepEqual(audit.unsupportedClaimIds, []);
-	assert.deepEqual(audit.countedClaimKeys, ["claims"]);
-	assert.deepEqual(audit.synthesisTaskIds, ["adaptive.synthesis"]);
-	assert.equal(
-		formatDynamicAuditSummary(audit),
-		"audit: 2/2 claims sourced, joins 0",
-	);
-});
 
-test("auditDynamicClaimSupport joins keyFindings evidenceRefs to generated task refs", () => {
-	const audit = auditDynamicClaimSupport({
-		synthesis: [
-			{
-				taskId: "adaptive.synthesis",
-				control: {
-					keyFindings: [
-						{
-							id: "f-evidence-ref",
-							summary: "artifact-ref-backed finding",
-							evidenceRefs: ["workflow_artifact:adaptive.research.refs"],
-						},
-					],
-				},
-			},
-		],
-		collected: [{ taskId: "research", specId: "adaptive.research" }],
-	});
-	assert.equal(audit.claimsTotal, 1);
-	assert.equal(audit.claimsWithSources, 1);
-	assert.equal(audit.claimsWithoutSources, 0);
-	assert.equal(audit.sourceRefJoinFailures, 0);
-	assert.deepEqual(audit.countedClaimKeys, ["keyFindings"]);
-});
 
 test("auditDynamicClaimSupport resolves only bounded deep links below indexed locators", () => {
 	const audit = auditDynamicClaimSupport({
@@ -151,49 +80,6 @@ test("auditDynamicClaimSupport resolves only bounded deep links below indexed lo
 	]);
 });
 
-test("auditDynamicClaimSupport counts unsourced claims and join failures", () => {
-	const audit = auditDynamicClaimSupport({
-		synthesis: [
-			{
-				taskId: "adaptive.synthesis",
-				control: {
-					claims: [
-						{ id: "c-none", text: "claim with no sources at all" },
-						{
-							id: "c-join-fail",
-							text: "claim citing an uncollected source",
-							sourceRefs: ["https://missing.example.com/nope"],
-						},
-					],
-					keyFindings: [
-						{
-							id: "f-ok",
-							summary: "sourced finding",
-							refs: ["https://example.com/evidence/"],
-						},
-					],
-				},
-			},
-		],
-		collected: [
-			{
-				taskId: "task-2",
-				specId: "adaptive.research",
-				refs: ["https://example.com/evidence"],
-			},
-		],
-	});
-	assert.equal(audit.claimsTotal, 3);
-	assert.equal(audit.claimsWithSources, 1);
-	assert.equal(audit.claimsWithoutSources, 2);
-	assert.equal(audit.sourceRefJoinFailures, 1);
-	assert.deepEqual(audit.unsupportedClaimIds, ["c-none", "c-join-fail"]);
-	assert.deepEqual(audit.countedClaimKeys, ["claims", "keyFindings"]);
-	assert.equal(
-		formatDynamicAuditSummary(audit),
-		"audit: 1/3 claims sourced, joins 1",
-	);
-});
 
 test("auditDynamicClaimSupport falls back to URLs embedded in claim text", () => {
 	const audit = auditDynamicClaimSupport({

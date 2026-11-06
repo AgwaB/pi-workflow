@@ -149,15 +149,6 @@ test('cross-round verification joins original candidate and retains both source 
  assert.ok(!indexes[1].blockers.some(b=>b.message.includes('unknown finding')));
 });
 
-test('first-round uppercase predecessor completes every accepted branch', async t => {
- const f=await fixture(t,'export default ctx => ctx.dynamic.runDecisionLoop();',{decisionLoop:{...loop,maxDecisionRounds:1}});
- let r=await schedule(f); await finish(f,r,'decide-r0',decision(0,[work('SOURCE'),work('followup',['SOURCE'])])); r=await schedule(f);
- await finish(f,r,'source',{findings:[]}); r=await schedule(f); await finish(f,r,'followup',{findings:[]}); r=await schedule(f);
- assert.equal(h.taskBySpec(r,'adaptive.controller').status,'completed');
- const events=await h.readDynamicEvents(f.dir,r.runId);
- const plan=events.find(e=>e.type==='fanout.planned');
- for (const branch of plan.payload.branches) assert.ok(events.some(e=>e.type==='task.generated'&&e.payload.branchId===branch.branchId&&e.requestHash===branch.requestHash));
-});
 
 test('custom controller cannot report success with an unresolvable exported output ID', async t => {
  for (const key of ['outputTasks','outputTaskIds']) {

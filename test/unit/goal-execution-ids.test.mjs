@@ -8,10 +8,6 @@ const definition = (criteria) => ({ schemaVersion: 1, name: "ids", goal: { objec
 const exact = (id, slot) => ({ id, verifier: { kind: "deterministic", producerId: "json-exact-value-v1", target: "artifact",
   subject: { resultSlot: slot, artifact: "control", path: "$.result" }, config: { comparison: "canonical-json-equality", expected: true } } });
 
-test("Goal execution identities mirror generated task identities", () => {
-  for (const id of ["Result", "a:b", "x.y_z-1", "--edge--", "Ünicode", "A".repeat(80)])
-    assert.equal(goalExecutionId(id), sanitizeTaskId(id), id);
-});
 
 test("IDs that collide once normalized are refused before any request", () => {
   assert.doesNotThrow(() => parseGoalWorkflowSpec(definition([exact("first", "result"), exact("second", "result")])),

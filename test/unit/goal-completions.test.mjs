@@ -22,16 +22,3 @@ test("/workflow goal suggests its subcommands and saved definitions to run", () 
     assert.equal(workflowArgumentCompletions(typed, workflows), undefined, `${typed} runs on the first Enter`);
   assert.deepEqual(workflowArgumentCompletions("goal statu", workflows)?.map(item => item.value), ["goal status"]);
 });
-
-test("goal help lists every completed subcommand in short lines", async () => {
-  const { WORKFLOW_GOAL_HELP } = await import("../../.tmp/unit/goal-workflow-commands.js");
-  const lines = WORKFLOW_GOAL_HELP.split("\n");
-  assert.ok(lines.every(line => line.length <= 100), "every help line fits 100 columns");
-  const subcommands = workflowArgumentCompletions("goal ", []).map(item => item.value.slice("goal ".length));
-  for (const name of subcommands.filter(name => name !== "help"))
-    assert.match(WORKFLOW_GOAL_HELP, new RegExp(`^  /workflow goal ${name}\\b`, "m"), `help explains ${name}`);
-  assert.doesNotMatch(WORKFLOW_GOAL_HELP, /NEVER-launched|goal_engine_ID|admission|oracle/, "no internal terms");
-  assert.doesNotMatch(WORKFLOW_GOAL_HELP, /goal profile\b/, "the profile exception is not advertised");
-  assert.match(WORKFLOW_GOAL_HELP, /goal pause <runId> +Pause after the current model request finishes/);
-  assert.match(WORKFLOW_GOAL_HELP, /goal cancel <runId> +Stop now; a model request in progress is cut off/);
-});

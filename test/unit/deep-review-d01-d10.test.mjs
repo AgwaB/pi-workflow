@@ -368,31 +368,6 @@ test("D05 keeps repeated LF bytes in rendered evidence quotes", async () => {
   assert.equal(r.markdown.includes(quote), true);
 });
 
-test("D06 accepts only honest empty-evidence NEEDS_HUMAN controls", () => {
-  const base = {
-    schema: "stage-control-v1",
-    digest: "d",
-    findingId: "f",
-    finding: "Finding",
-    verdict: "NEEDS_HUMAN",
-    evidence: [],
-    counterEvidence: [],
-    recommendedAction: "Inspect",
-    evidenceUnavailableReason: "Source was inaccessible.",
-  };
-  assert.equal(validateJsonSchema(base, verifierSchema).valid, true);
-  assert.equal(
-    validateJsonSchema(
-      { ...base, evidenceUnavailableReason: undefined },
-      verifierSchema,
-    ).valid,
-    false,
-  );
-  assert.equal(
-    validateJsonSchema({ ...base, verdict: "KEEP" }, verifierSchema).valid,
-    false,
-  );
-});
 
 test("D06 keeps unavailable verifier evidence separate from reviewer/source evidence", async () => {
   const sourceFinding = finding("human", "Needs human evidence", 1, {

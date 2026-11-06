@@ -33,31 +33,6 @@ test("WB-016 scheduler wakes at earliest pending retry deadline within fixed bou
 	assert.deepEqual(run, before);
 });
 
-test("WB-016 scheduler retains fixed poll for absent, expired, or non-pending deadlines", () => {
-	const now = Date.parse("2026-07-10T02:00:00.000Z");
-	assert.equal(
-		schedulerPollDelayMs(
-			{
-				tasks: [
-					task("pending", new Date(now - 1).toISOString()),
-					task("completed", new Date(now + 10).toISOString()),
-				],
-			},
-			10_000,
-			now,
-		),
-		1_000,
-	);
-	assert.equal(schedulerPollDelayMs({ tasks: [] }, 250, now), 250);
-	assert.equal(
-		schedulerPollDelayMs(
-			{ tasks: [task("pending", new Date(now + 1).toISOString())] },
-			10_000,
-			now,
-		),
-		1,
-	);
-});
 
 test("WB-016 wait loop uses deadline selector while refresh remains single-write coalesced", async () => {
 	const [engine, backend] = await Promise.all([

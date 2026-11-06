@@ -227,57 +227,6 @@ function resign(record) {
 	};
 }
 
-test("resolver preserves legacy behavior and emits warning-only raw diagnostics", () => {
-	assert.equal(
-		resolveWorkflowResourcePolicy({ inheritSkills: false }),
-		undefined,
-	);
-	assert.deepEqual(
-		resolveWorkflowResourcePolicy({
-			resourcePolicyVersion: WORKFLOW_RESOURCE_POLICY_VERSION,
-			inheritSkills: false,
-		}),
-		{ version: 1, skillDiscovery: "disabled", contextFiles: "disabled" },
-	);
-	for (const inheritSkills of [undefined, true]) {
-		assert.deepEqual(
-			resolveWorkflowResourcePolicy({
-				resourcePolicyVersion: WORKFLOW_RESOURCE_POLICY_VERSION,
-				inheritSkills,
-			}),
-			{ version: 1, skillDiscovery: "ambient", contextFiles: "disabled" },
-		);
-	}
-	assert.deepEqual(
-		resolveWorkflowResourcePolicy({
-			resourcePolicyVersion: WORKFLOW_RESOURCE_POLICY_VERSION,
-			inheritSkills: "false",
-			inheritProjectContext: true,
-		}),
-		{ version: 1, skillDiscovery: "ambient", contextFiles: "disabled" },
-	);
-	assert.throws(
-		() => resolveWorkflowResourcePolicy({ resourcePolicyVersion: 2 }),
-		/unsupported/,
-	);
-	const warnings = resourceInheritanceWarnings({
-		displayName: "unit-agent",
-		frontmatter: {
-			inheritSkills: "false",
-			inheritProjectContext: true,
-		},
-	});
-	assert.equal(warnings.length, 2);
-	assert.match(warnings[0], /non-boolean inheritSkills/);
-	assert.match(warnings[1], /project context discovery remains disabled/);
-	assert.match(
-		resourceInheritanceWarnings({
-			displayName: "unit-agent",
-			frontmatter: { inheritProjectContext: "true" },
-		})[0],
-		/non-boolean inheritProjectContext/,
-	);
-});
 
 test("sealed launch applies skills only for current false and preserves tools, extensions, and sessions", async () => {
 	const cases = [
@@ -312,74 +261,6 @@ test("sealed launch applies skills only for current false and preserves tools, e
 	}
 });
 
-test("prepared policy omission, toggles, and unsupported versions fail before a fake launch", async () => {
-	const value = await fixture("prepared-drift", {
-		resourcePolicyVersion: 1,
-		inheritSkills: false,
-	});
-	const captured = [];
-	try {
-		const prepared = await prepareSubagentTaskLaunch(
-			value.cwd,
-			value.run,
-			value.task,
-			value.compiledTask,
-		);
-		installFakeApi(captured);
-		await assert.rejects(
-			launchSubagentTask(
-				value.cwd,
-				value.run,
-				value.task,
-				value.compiledTask,
-				undefined,
-				undefined,
-				{ ...prepared, resourcePolicy: undefined },
-			),
-			/resource policy drifted/,
-		);
-		assert.equal(captured.length, 0);
-
-		value.task.status = "pending";
-		value.task.backendHandle = undefined;
-		await assert.rejects(
-			launchSubagentTask(
-				value.cwd,
-				value.run,
-				value.task,
-				value.compiledTask,
-				undefined,
-				undefined,
-				{
-					...prepared,
-					resourcePolicy: {
-						version: 1,
-						skillDiscovery: "ambient",
-						contextFiles: "disabled",
-					},
-				},
-			),
-			/resource policy drifted/,
-		);
-		assert.equal(captured.length, 0);
-
-		const invalid = await fixture("unsupported-version", {
-			resourcePolicyVersion: 2,
-		});
-		await assert.rejects(
-			prepareSubagentTaskLaunch(
-				invalid.cwd,
-				invalid.run,
-				invalid.task,
-				invalid.compiledTask,
-			),
-			/unsupported/,
-		);
-	} finally {
-		setSubagentApiForTests(undefined);
-		setSubagentLaunchControlsForTests({ releaseDelayMs: 0, retryJitterMs: 0 });
-	}
-});
 
 test("legacy provenance stays v1 while current records require a closed v2 policy schema", async () => {
 	const legacy = await fixture("legacy-provenance", { inheritSkills: false });

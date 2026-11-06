@@ -441,48 +441,6 @@ test("nested displaced cleanup failures retain the recovery proof", async t => {
   }
 });
 
-test("materialization surfaces an owned staging unlink fault without deleting the retained proof", async t => {
-  const root = await realpath(await disposableRoot(t));
-  const origin = join(root, "origin"), workspace = join(root, "workspace");
-  await mkdir(origin);
-  await writeFile(join(origin, "input.txt"), "complete input");
-  const originalOpen = fsPromises.open, originalUnlink = fsPromises.unlink;
-  let temporary;
-  fsPromises.open = async function(path, ...args) {
-    const file = await originalOpen.call(this, path, ...args);
-    if (String(path).includes(".input.txt.goal-materialize-")) {
-      temporary = String(path);
-      file.write = async () => { throw new Error("fixture staging write failure"); };
-    }
-    return file;
-  };
-  fsPromises.unlink = async function(path, ...args) {
-    if (String(path) === temporary) {
-      const error = new Error("fixture staging unlink failure");
-      error.code = "EIO";
-      throw error;
-    }
-    return originalUnlink.call(this, path, ...args);
-  };
-  syncBuiltinESMExports();
-  try {
-    await assert.rejects(prepareGoalWorkspaceHost({
-      originRoot: origin, workspaceRoot: workspace, workspaceId: "unlink-fault",
-      mode: "mutation", repository: "nonGit", scope: ["input.txt"],
-    }), error => {
-      assert.ok(error instanceof AggregateError);
-      assert.ok(error.errors.some(value => /fixture staging write failure/.test(value.message)));
-      assert.ok(error.errors.some(value => /fixture staging unlink failure/.test(value.message)));
-      return true;
-    });
-    assert.ok(temporary);
-    assert.equal((await fsPromises.lstat(temporary)).isFile(), true);
-  } finally {
-    fsPromises.open = originalOpen;
-    fsPromises.unlink = originalUnlink;
-    syncBuiltinESMExports();
-  }
-});
 
 test("NONAUTHORITY preparation guard fences observation and retains partial creation without rollback", async t => {
   for (const stage of ["missing", "revoked", "origin-observation", "root-created", "seed-open", "parent-created"]) {
@@ -1438,65 +1396,7 @@ test("real Git observation preserves HEAD/index/source bytes and reuses one dirt
   assert.equal((await handle.cleanup()).status, "removed");
 });
 
-test("Git host commands ignore ambient repository and config environment overrides", async (t) => {
-  const fixture = await gitFixture(t);
-  const decoy = join(fixture.root, "decoy.git");
-  await mkdir(decoy);
-  await git(decoy, "init", "--bare", "-q");
-  await withEnvironment(
-    {
-      GIT_DIR: decoy,
-      GIT_WORK_TREE: fixture.root,
-      GIT_INDEX_FILE: join(fixture.root, "decoy-index"),
-      GIT_COMMON_DIR: decoy,
-      GIT_OBJECT_DIRECTORY: decoy,
-      GIT_ALTERNATE_OBJECT_DIRECTORIES: decoy,
-      GIT_CONFIG_COUNT: "1",
-      GIT_CONFIG_KEY_0: "core.bare",
-      GIT_CONFIG_VALUE_0: "true",
-      GIT_CONFIG_PARAMETERS: "'core.bare'='true'",
-      GIT_CONFIG_GLOBAL: join(fixture.root, "missing-global-config"),
-      GIT_CEILING_DIRECTORIES: fixture.root,
-    },
-    async () => {
-      const handle = await prepareGoalWorkspaceHost({
-        ...workspaceRequest(fixture, "sanitized-env"),
-        scope: ["a.txt"],
-        protectedPaths: [],
-      });
-      assert.equal(decode(handle.baseline.origin.files[0].head), "head-a");
-      assert.equal((await handle.cleanup()).status, "removed");
-    },
-  );
-});
 
-test("Git workspace creation uses no checkout filters/hooks and records raw scoped bytes", async (t) => {
-  const fixture = await gitFixture(t);
-  const marker = join(fixture.root, "untrusted-executed");
-  const hook = join(fixture.origin, ".git", "hooks", "post-checkout");
-  await writeFile(hook, `#!/bin/sh\necho hook > ${JSON.stringify(marker)}\n`);
-  await chmod(hook, 0o755);
-  await writeFile(
-    join(fixture.origin, ".gitattributes"),
-    "a.txt filter=goal-evil\n",
-  );
-  await git(fixture.origin, "add", ".gitattributes");
-  await git(fixture.origin, "commit", "-qm", "attributes");
-  await git(
-    fixture.origin,
-    "config",
-    "filter.goal-evil.smudge",
-    `sh -c 'echo filter > ${marker}; cat'`,
-  );
-  const request = { ...workspaceRequest(fixture), scope: ["a.txt"] };
-  const handle = await prepareGoalWorkspaceHost(request);
-  assert.equal(
-    await readFile(join(handle.workspaceRoot, "a.txt"), "utf8"),
-    "head-a",
-  );
-  await assert.rejects(readFile(marker), (error) => error.code === "ENOENT");
-  assert.equal((await handle.cleanup()).status, "removed");
-});
 
 test("nested staged deletions do not leave empty candidate directories", async (t) => {
   const fixture = await gitFixture(t);

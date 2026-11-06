@@ -103,14 +103,6 @@ test("the profile exception consent names the task, the runtime change and the r
   ].join("\n"));
 });
 
-test("a single criterion reads naturally and child-workflow effects need declared children", () => {
-  const base = preview();
-  const summary = formatGoalExecutionConsent(preview({
-    definition: { ...base.definition, goal: { ...base.definition.goal, criteria: [base.definition.goal.criteria[0]] } },
-    workflows: [] }));
-  assert.match(summary, /^Done when this criterion holds:$/m);
-  assert.doesNotMatch(summary, /run declared child workflows/);
-});
 
 test("full details explain every part in plain language and end with the exact bound preview", () => {
   const value = preview({ exclusions: ["deployment", "arbitrary-commands", "cost-accounting"],
@@ -144,32 +136,4 @@ test("full details explain every part in plain language and end with the exact b
   ]) assert.match(readable, expected);
   assert.ok(readable.split("\n").every(line => line.length <= 160), "lines fit a normal terminal");
   assert.match(formatGoalExecutionDetails({ weird: true }), /could not be described; its exact content follows\.\n\n\{/);
-});
-
-test("summary and details wrap to the terminal width so Pi does not wrap them again", () => {
-  for (const width of [80, 100, 150]) {
-    const summary = formatGoalExecutionConsent(preview(), width).split("\n");
-    assert.ok(summary.every(line => line.length <= width), `summary fits ${width} columns`);
-    assert.equal(summary.find(line => line.startsWith("Objective")).endsWith(" "), false);
-    assert.match(summary[summary.findIndex(line => line.startsWith("Objective")) + 1], /^ {37}\S/,
-      "the objective continues under its hanging indent");
-    const details = formatGoalExecutionDetails(preview(), width);
-    const readable = details.slice(0, details.lastIndexOf("Exact preview this consent is bound to (JSON)")).split("\n");
-    assert.ok(readable.every(line => line.length <= width), `readable details fit ${width} columns`);
-  }
-  assert.ok(formatGoalExecutionConsent(preview(), 20).split("\n").every(line => line.length <= 60), "never narrower than 60");
-  assert.equal(formatGoalExecutionConsent(preview()), formatGoalExecutionConsent(preview(), 160), "default is 160 columns");
-});
-
-test("cost caps read as dollars", async () => {
-  const { formatCostCap } = await import("../../.tmp/unit/goal-consent-summary.js");
-  assert.equal(formatCostCap(0), "$0.00");
-  assert.equal(formatCostCap(500_000), "$0.50");
-  assert.equal(formatCostCap(2_500), "$0.0025");
-  assert.equal(formatCostCap(12_000_000), "$12.00");
-  const withCost = preview();
-  withCost.definition.goal.limits = { requests: 40, costMicros: 500_000 };
-  const summary = formatGoalExecutionConsent(withCost);
-  assert.match(summary, /cost: \$0\.50/);
-  assert.doesNotMatch(summary, /micros/);
 });

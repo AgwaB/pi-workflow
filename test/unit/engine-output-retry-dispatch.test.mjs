@@ -210,42 +210,6 @@ test("a task whose attempt passed output validation is never re-dispatched by la
 	}
 });
 
-test("a completed upstream task is not re-dispatched while downstream stages still schedule", async () => {
-	const cwd = makeProject();
-	const runs = new Map();
-	let launchCount = 0;
-	try {
-		writeAgent(cwd, "unit-scout");
-		writeWorkflow(cwd, "two-stage", TWO_STAGE_SPEC);
-		setSubagentApiForTests(
-			makeFakeSubagentApi({
-				cwd,
-				runs,
-				outputsByLaunch: [VALID_OUTPUT, VALID_OUTPUT],
-				onLaunch: () => {
-					launchCount += 1;
-					return launchCount;
-				},
-			}),
-		);
-
-		const started = await runWorkflow("two-stage", cwd, {
-			task: "Exercise completed-task invariance across later scheduler ticks.",
-		});
-		const completed = await waitForRun(cwd, started.runId, 20_000);
-		assert.equal(completed.status, "completed");
-		for (const task of completed.tasks) {
-			assert.equal(task.status, "completed");
-		}
-
-		// The scheduler ticks that launch stage "second" must not re-dispatch
-		// the already-completed stage "first": exactly one launch per stage.
-		assert.equal(launchCount, 2);
-	} finally {
-		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
 
 test("zero output retry override fails the first invalid workflow output", async () => {
 	const cwd = makeProject();

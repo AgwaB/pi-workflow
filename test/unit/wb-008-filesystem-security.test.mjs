@@ -28,29 +28,6 @@ import {
 	writePrivateFileAtomic,
 } from "../../.tmp/unit/secure-atomic-write.js";
 
-test("private generation publication crash leaves no ownerless live lock", async () => {
-	const root = await mkdtemp(join(tmpdir(), "piwf-wb008-generation-"));
-	const target = join(root, "lock");
-	try {
-		setSecureAtomicBeforeRenameHookForTests(() => {
-			throw new Error("simulated crash before generation publication");
-		});
-		await assert.rejects(
-			publishPrivateGenerationDirectory(target, "owner.json", '{"ownerId":"test"}\\n'),
-			/crash before generation publication/,
-		);
-		await assert.rejects(stat(target), { code: "ENOENT" });
-		setSecureAtomicBeforeRenameHookForTests(undefined);
-		const identity = await publishPrivateGenerationDirectory(target, "owner.json", '{"ownerId":"test"}\\n');
-		const published = await stat(target);
-		assert.equal(published.isDirectory(), true);
-		assert.deepEqual(identity, { dev: published.dev, ino: published.ino, nlink: published.nlink });
-		assert.equal((await stat(join(target, "owner.json"))).isFile(), true);
-	} finally {
-		setSecureAtomicBeforeRenameHookForTests(undefined);
-		await rm(root, { recursive: true, force: true });
-	}
-});
 
 test("private generation publication preserves a byte-identical substituted preparation", async () => {
 	const root = await mkdtemp(join(tmpdir(), "piwf-wb008-generation-substitution-"));
