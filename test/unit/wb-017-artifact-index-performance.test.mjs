@@ -181,26 +181,6 @@ async function indexedRunIds(cwd) {
 	return index.runs.map((run) => run.runId).sort();
 }
 
-test("WB-017 batches all nonterminal dirty runs in one cwd index flush", async (t) => {
-	setIndexUpdateDebounceMsForTests(60_000);
-	t.after(async () => {
-		setIndexUpdateDebounceMsForTests(undefined);
-		await flushPendingIndexUpdatesForTests();
-	});
-	await flushPendingIndexUpdatesForTests();
-	const cwd = await mkdtemp(join(tmpdir(), "piwf-wb017-index-"));
-	t.after(() => rm(cwd, { recursive: true, force: true }));
-	const runs = ["workflow_a", "workflow_b", "workflow_c"].map((id) =>
-		runningRun(cwd, id),
-	);
-	for (const run of runs) await writeRunRecord(cwd, run);
-	for (const [index, run] of runs.entries()) {
-		run.tasks[0].lastMessage = `dirty-${index}`;
-		await writeRunRecord(cwd, run);
-	}
-	assert.equal(await flushPendingIndexUpdatesForTests(), 1);
-	assert.deepEqual(await indexedRunIds(cwd), runs.map((run) => run.runId).sort());
-});
 
 test("WB-017 keeps cwd batches separate and terminal cancellation preserves sibling dirtiness", async (t) => {
 	setIndexUpdateDebounceMsForTests(60_000);

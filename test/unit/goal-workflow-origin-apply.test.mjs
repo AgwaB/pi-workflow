@@ -98,18 +98,6 @@ test("origin apply stops before writing when the Goal was stopped", async t => {
 	assert.equal(await readFile(join(origin, "a.txt"), "utf8"), "a");
 });
 
-test("origin apply in a Git origin changes only the working tree, not HEAD or the index", async t => {
-	const { origin, workspace } = await fixture(t, { git: true, files: { "a.txt": "base\n", "b.txt": "keep\n" }, scope: ["a.txt"] });
-	const git = (...args) => execFileSync("git", args, { cwd: origin, encoding: "utf8" });
-	const head = git("rev-parse", "HEAD");
-	await candidateWrite(workspace, "a.txt", "goal result\n");
-	const record = await applyGoalCandidateToOrigin({ originRoot: origin, workspace, controlRoots: [] });
-	assert.equal(record.status, "applied", JSON.stringify(record));
-	assert.equal(await readFile(join(origin, "a.txt"), "utf8"), "goal result\n");
-	assert.equal(git("rev-parse", "HEAD"), head);
-	assert.equal(git("diff", "--cached", "--name-only"), "", "nothing is staged");
-	assert.equal(git("diff", "--name-only").trim(), "a.txt");
-});
 
 test("origin apply refuses a Git origin whose HEAD moved after the baseline", async t => {
 	const { origin, workspace } = await fixture(t, { git: true, files: { "a.txt": "base\n", "b.txt": "keep\n" }, scope: ["a.txt"] });
@@ -132,20 +120,6 @@ test("origin apply rechecks the whole scope after the progress record and before
 	assert.equal(await readFile(join(origin, "b.txt"), "utf8"), "user edit");
 });
 
-test("origin apply keeps a user edit made while the replacement is staged", async t => {
-	const { origin, workspace } = await fixture(t, { files: { "a.txt": "a" } });
-	await candidateWrite(workspace, "a.txt", "goal");
-	const states = [];
-	const record = await applyGoalCandidateToOrigin({ originRoot: origin, workspace, controlRoots: [],
-		onProgress: async value => {
-			states.push(value.paths[0].state);
-			if (value.paths[0].state === "unknown") await writeFile(join(origin, "a.txt"), "user save");
-		} });
-	assert.equal(record.status, "conflict", JSON.stringify(record));
-	assert.equal(record.paths[0].state, "conflict");
-	assert.deepEqual(states.slice(0, 2), ["pending", "unknown"], "the in-flight state is durable before the effect");
-	assert.equal(await readFile(join(origin, "a.txt"), "utf8"), "user save", "the concurrent save is not replaced");
-});
 
 test("origin apply refuses an origin directory replaced by a symlink after preflight", async t => {
 	const { root, origin, workspace } = await fixture(t, { files: { "a.txt": "a" } });

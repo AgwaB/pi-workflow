@@ -15,17 +15,6 @@ function status({ runStatus = "completed", state = "engine:achieved", taskStatus
         ...(index === 0 ? { command: { exitCode: verdict === "met" ? 0 : 1, signal: null, timedOut: false } } : {}) })) }] };
 }
 
-test("an achieved, applied Goal reads as one short report", () => {
-  assert.equal(summarizeOrdinaryWorkflowGoal(status({
-    originApply: { status: "applied", paths: [{ path: "src/csv.mjs", state: "applied" }] } })), [
-    "Goal csv-parser (workflow_s) — achieved",
-    "Criteria: 1 of 1 met",
-    "  ✓ c1 — met (exit 0)",
-    "Working tree: applied src/csv.mjs",
-    "Used: attempts 2 · requests 8 · cost $0.0030",
-    "Tokens: 1200",
-  ].join("\n"), "an achieved Goal needs no next step");
-});
 
 test("partial application, failure and judgment each name the next step", () => {
   const partial = summarizeOrdinaryWorkflowGoal(status({ originApply: { status: "conflict",

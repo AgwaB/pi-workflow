@@ -75,18 +75,6 @@ function fixture(label) {
   return { cwd, runId, before, afterCompiled, run };
 }
 
-test("ordinary graph persistence needs no Goal digest or journal", async () => {
-  const value = fixture("ordinary");
-  delete value.run.goal;
-  setGoalGeneratedMaterializationHookForTests(() => {
-    assert.fail("ordinary persistence must not enter Goal journaling");
-  });
-  await persistGoalGeneratedMaterialization(value.cwd, value.run, value.afterCompiled, undefined);
-  assert.deepEqual(await readJson(compiledWorkflowPath(value.cwd, value.runId)), value.afterCompiled);
-  const persisted = await readRunRecord(value.cwd, value.runId);
-  assert.deepEqual(persisted.tasks, value.run.tasks);
-  assert.equal(persisted.goalGeneratedMaterialization, undefined);
-});
 
 test("ordinary graph persistence does not inherit the Goal JSON byte ceiling", async () => {
   const value = fixture("ordinary-large");

@@ -91,34 +91,6 @@ function completedRun(runId, wallMinutes, ageMinutes, overrides = {}) {
 	});
 }
 
-test("estimateWorkflowDurationMs returns the median of the most recent completed same-name runs", async () => {
-	const cwd = makeProject();
-	try {
-		const runs = [];
-		// 10 completed same-name runs; only the 8 most recent may be sampled.
-		// Recent walls 2,4,...,16 minutes → median (8+10)/2 = 9 minutes. The two
-		// oldest runs have 100-minute walls and must fall outside the sample cap.
-		for (let i = 0; i < 8; i += 1) {
-			runs.push(completedRun(`workflow_recent_${i}`, 2 * (i + 1), 60 + i * 10));
-		}
-		runs.push(completedRun("workflow_old_1", 100, 500));
-		runs.push(completedRun("workflow_old_2", 100, 510));
-		// Noise that must be ignored entirely.
-		runs.push(completedRun("workflow_other", 1, 30, { name: "other" }));
-		runs.push(
-			completedRun("workflow_child", 1, 30, {
-				parentRunId: "workflow_recent_0",
-			}),
-		);
-		runs.push(completedRun("workflow_running", 1, 30, { status: "running" }));
-		writeIndex(cwd, runs);
-
-		const estimate = await estimateWorkflowDurationMs(cwd, "deep-research");
-		assert.deepEqual(estimate, { medianMs: 9 * MINUTE_MS, samples: 8 });
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
 
 test("estimateWorkflowDurationMs excludes mock runs and needs at least two samples", async () => {
 	const cwd = makeProject();

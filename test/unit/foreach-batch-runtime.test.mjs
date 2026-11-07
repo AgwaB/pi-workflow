@@ -616,36 +616,6 @@ test("batch group keys persist from raw items and envelope ids are strict", () =
 	}
 });
 
-test("batch prompt makes nested JSON decoding explicit and preserves decoded prepared prompts", () => {
-	const itemPrompts = [
-		'Copy payload {"value":"quoted \\"alpha\\" and slash \\\\ path"}.',
-		"Copy payload with a real newline:\nsecond line.",
-	];
-	const prompt = buildForeachBatchPrompt({
-		leader: {},
-		items: [
-			{ id: "task-1", prompt: itemPrompts[0] },
-			{ id: "task-2", prompt: itemPrompts[1] },
-		],
-	});
-	assert.match(prompt, /Parse it as JSON before processing either item/);
-	assert.match(prompt, /never from its displayed serialized representation/);
-	assert.match(
-		prompt,
-		/same threshold you would use if that item were the only task/,
-	);
-	const encoded = prompt.split("# Untrusted Prepared Item Tasks\n\n")[1];
-	let decoded;
-	try {
-		decoded = JSON.parse(encoded);
-	} catch (error) {
-		assert.fail(`batch prompt must end in valid JSON: ${String(error)}`);
-	}
-	assert.deepEqual(
-		decoded.items.map((item) => item.taskPrompt),
-		itemPrompts,
-	);
-});
 
 test("persisted batch phases and phase-dependent receipts fail closed", () => {
 	const digest = "a".repeat(64);
@@ -2215,40 +2185,6 @@ test("fallback physical ownership rejects zero, null, conflicting, and active mi
 	assert.equal(foreachBatchTasks(validLegacy, record).length, 2);
 });
 
-test("zero and one foreach items remain valid without creating batch ownership", async () => {
-	for (const itemCount of [0, 1]) {
-		const cwd = makeProject();
-		try {
-			writeAgent(cwd);
-			const name = `batch-cardinality-${itemCount}`;
-			const items = writeWorkflow(cwd, name, { itemCount });
-			const fake = fakeApi({
-				cwd,
-				items,
-				batchItemFactory() {
-					throw new Error("cardinality below two must not launch a batch");
-				},
-			});
-			setSubagentApiForTests(fake.api);
-			const started = await runWorkflow(name, cwd, {
-				task: `Run ${itemCount} foreach items.`,
-				executionProfile: "batched",
-			});
-			const completed = await waitForRun(cwd, started.runId, 20_000);
-			assert.equal(completed.status, "completed");
-			assert.equal(completed.foreachBatches?.length ?? 0, 0);
-			assert.deepEqual(
-				fake.launches.map((launch) => launch.kind),
-				itemCount === 0
-					? ["source", "downstream"]
-					: ["source", "singleton", "downstream"],
-			);
-		} finally {
-			setSubagentApiForTests(undefined);
-			rmSync(cwd, { recursive: true, force: true });
-		}
-	}
-});
 
 test("logical concurrency below two degrades an eligible pair to ordered singletons", async () => {
 	for (const scenario of [

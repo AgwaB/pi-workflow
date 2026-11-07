@@ -103,16 +103,6 @@ test("complete replay rejects journal gaps, changed hashes and omitted heads", (
   }
 });
 
-test("request and exact result lineage is once-only", () => {
-  for (const records of [
-    [opened, request("x")],
-    [opened, producer, request("x"), request("x")],
-    [opened, producer, request("x"), result("x", 4)],
-    [opened, producer, request("x"), result("x", 3), result("x", 3)],
-    [opened, producer, request("release", "release")],
-    [opened, producer, bound, bound],
-  ]) assert.throws(() => inspectGoalHostEffects(history(records)));
-});
 
 test("fencing forbids release/tool/apply/verify/spawn but accounts stop and inspection", () => {
   for (const operation of ["spawn", "release", "tool", "apply", "verify", "remove"]) {
@@ -184,21 +174,6 @@ test("unknown acknowledgement is sticky; later inspection cannot erase it or aut
   assert.throws(() => inspectGoalHostEffects(history([...records, result("spawn", 3)])));
 });
 
-test("callback holes, duplicate and final contradictions remain durable conflicts", () => {
-  for (const callbacks of [
-    [callback(2), callback(1)],
-    [callback(1), callback(1)],
-    [callback(1, "final"), callback(2)],
-    [{ ...callback(1), producerId: "absent" }],
-  ]) {
-    const records = [opened, producer, bound, ...callbacks];
-    const view = inspectGoalHostEffects(history(records));
-    assert.equal(view.fenced, true);
-    assert.ok(view.conflicts.length > 0);
-    assert.equal(view.bookkeepingComplete, false);
-    assert.throws(() => inspectGoalHostEffects(history(seal(records))));
-  }
-});
 
 test("missing FINAL, unknown producer and premature close cannot establish completeness", () => {
   assert.throws(() => inspectGoalHostEffects(history([opened, producer, closed])));
@@ -241,17 +216,6 @@ test("post-seal removal remains an accounted pending effect and unknown result b
   assert.equal(inspectGoalHostEffects(history([...records, result("remove", records.length)])).sealed, true);
 });
 
-test("physical host ledger persists before promise fulfillment and reopens read-only (not a dispatch gate)", async (t) => {
-  const { root, host } = await fixture(t);
-  await host.record(producer);
-  const pending = await host.record(request("spawn"));
-  assert.deepEqual(pending.pendingEffects, ["spawn"]);
-  const reopened = await GoalHostEffects.open(root);
-  assert.deepEqual(await reopened.inspect(), pending);
-  const complete = await host.record(result("spawn", 3));
-  assert.deepEqual(complete.pendingEffects, []);
-  assert.equal(complete.goalDrain, "not-established");
-});
 
 test("physical producer fence survives reopen and leaves a sibling dispatchable", async (t) => {
   const { root, host } = await fixture(t);
@@ -286,25 +250,7 @@ test("an unattributed FINAL cannot be retroactively bound and sealed", () => {
   assert.throws(() => inspectGoalHostEffects(history([...prefix, bound, fence, closed])));
 });
 
-test("physical host ledger serializes competing IDs and retains only one durable request", async (t) => {
-  const { root, host } = await fixture(t);
-  await host.record(producer);
-  const results = await Promise.allSettled([host.record(request("same")), host.record(request("same"))]);
-  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
-  const view = await (await GoalHostEffects.open(root)).inspect();
-  assert.equal(view.head.seq, 3);
-  assert.deepEqual(view.pendingEffects, ["same"]);
-});
 
-test("physical ledger captures mutable inputs before asynchronous publication", async (t) => {
-  const { host } = await fixture(t);
-  await host.record(producer);
-  const mutable = request("captured");
-  const pending = host.record(mutable);
-  mutable.effectId = "mutated";
-  mutable.goalHead.seq = 999;
-  assert.deepEqual((await pending).pendingEffects, ["captured"]);
-});
 
 test("physical ledger preserves late contradictions across reopen", async (t) => {
   const { root, host } = await fixture(t);

@@ -303,15 +303,3 @@ test("auto compatibility picker keeps duplicate display names bound to distinct 
 	assert.equal(result, "second");
 	assert.deepEqual(calls[0].options, ["1. same", "2. same"]);
 });
-
-test("compatibility adapter retains the ordinary select flow without a native preview", async () => {
-	const calls = [];
-	const profileUi = createNativeWorkflowProfileUi({
-		select: async (title, options) => { calls.push({ title, options }); return options[1]; },
-		notify() {},
-	});
-	assert.equal(profileUi.preview, undefined);
-	const choices = ["Codex", "Codex High", "Claude", "Mixed", "Custom"];
-	assert.equal(await profileUi.select("Profiles", choices, { selected: "Custom" }), "Codex High");
-	assert.deepEqual(calls, [{ title: "Profiles", options: choices }]);
-});

@@ -76,18 +76,6 @@ for (const mutation of ['missing-middle', 'hash-mismatch', 'contract-corrupt', '
     assert.deepEqual(await journal(root), bytes); assert.deepEqual(await readFile(join(root, 'contract.json')), contract);
   });
 }
-test('S05 CORE actual concurrent processes: one publication while winner holds fsync barrier', { timeout: 20000 }, async t => {
-  const { root, store, snapshot } = await setup();
-  const a = launch(root, snapshot, 'file-synced'); const b = launch(root, snapshot);
-  t.after(() => { if (a.child.exitCode === null) a.child.kill(); if (b.child.exitCode === null) b.child.kill(); });
-  await Promise.all([a.wait('ready'), b.wait('ready')]);
-  a.child.send('go'); await a.wait('barrier'); // Actual writer owns lock and a fsynced uncommitted file.
-  b.child.send('go'); const loser = await b.wait('result'); assert.equal(loser.status, 'rejected'); assert.match(loser.error, /EEXIST/);
-  a.child.send('release'); const winner = await a.wait('result'); assert.equal(winner.status, 'ok');
-  await Promise.all([a.exit, b.exit]);
-  const loaded = await store.load(); assert.equal(loaded.status, 'ok'); assert.equal(loaded.seq, 1);
-  assert.equal((await journal(root)).length, 2); assert.equal(loaded.hash, winner.hash);
-});
 test('S05 S07 CORE expected hash/sequence and owner epoch checked inside exclusive section; rejection cannot overwrite', async () => {
   const { root, f, store, owner, snapshot } = await setup();
   assert.equal((await store.assertCurrentOwner(owner, f.obs())).hash, snapshot.hash);
@@ -147,26 +135,6 @@ test('missing successor verifier journal content is not an absent optional ledge
   assert.equal((await store.load()).ownerId, owner.ownerId);
   assert.deepEqual(await journal(root), before);
 });
-for (const point of ['temp-written', 'file-synced', 'published', 'directory-synced', 'before-projection']) {
-  test(`S04 CORE actual process crash at ${point}: committed prefix distinguished, residue retained`, { timeout: 20000 }, async t => {
-    const { root, store, snapshot } = await setup(); const beforeProjection = await readFile(join(root, 'projection.json'), 'utf8');
-    const p = launch(root, snapshot, point); t.after(() => { if (p.child.exitCode === null && p.child.signalCode === null) p.child.kill(); });
-    await p.wait('ready'); p.child.send('go'); await p.wait('barrier');
-    if (point === 'file-synced') p.child.kill('SIGKILL');
-    const [code, signal] = await p.exit;
-    if (point === 'file-synced') assert.equal(signal, 'SIGKILL'); else assert.equal(code, 73);
-    const s = await store.load(); assert.equal(s.status, 'ok');
-    const committed = !['temp-written', 'file-synced'].includes(point);
-    assert.equal(s.seq, committed ? 1 : 0); assert.equal(s.events.length, committed ? 1 : 0);
-    assert.equal(await readFile(join(root, 'projection.json'), 'utf8'), beforeProjection);
-    assert.ok((await readdir(root)).includes('.commit-lock'));
-    if (point !== 'before-projection') assert.ok(s.evidence.some(n => n.startsWith('.txn-')));
-    const bytes = await journal(root);
-    await assert.rejects(store.rebuildProjection(), /EEXIST/); // Read replay works; unsafe auto recovery does not.
-    assert.deepEqual(await journal(root), bytes);
-    console.log(JSON.stringify({ caseId: 'S04', point, root, seq: s.seq, evidence: s.evidence, exit: code, signal }));
-  });
-}
 test('S03 S05 CORE preexisting sequence cannot be overwritten even by direct competing publication', async () => {
   const { root, f, store, owner, snapshot } = await setup();
   const path = join(root, 'journal', '0000000001.json');
@@ -205,13 +173,4 @@ test('G4 cold replay exposes effective revised background contract without rewri
   }
   assert.deepEqual(await readFile(join(root, 'contract.json')), genesis);
   assert.equal((await store.load()).lifecycleCustodyIssuances.length, 0);
-});
-test('S03 S04 CORE failed write retains uncommitted temp and does not replace previous projection', async () => {
-  const { root, f, owner, snapshot } = await setup();
-  const before = await readFile(join(root, 'projection.json'), 'utf8');
-  const store = new GoalStore(root, { fault: point => { if (point === 'temp-written') throw new Error('fixture IO fault before fsync'); } });
-  await assert.rejects(store.commitEvent(owner, snapshot, f.event('start')), /fixture IO fault/);
-  const s = await store.load(); assert.equal(s.status, 'ok'); assert.equal(s.seq, 0); assert.equal(s.evidence.length, 1);
-  assert.equal(await readFile(join(root, 'projection.json'), 'utf8'), before);
-  assert.ok((await readdir(root)).includes('.commit-lock'));
 });

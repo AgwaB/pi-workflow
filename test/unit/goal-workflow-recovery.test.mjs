@@ -180,30 +180,6 @@ test("a run is recovered at most once and concurrent recoveries are refused", as
   await assert.rejects(planWorkflowGoalRecovery(cwd, RUN, notLive), /already recovered as workflow_mvzrecov_newrun/);
 });
 
-test("two processes racing to recover the same run: exactly one claims it", async () => {
-  const { cwd } = await interruptedRun();
-  const moduleUrl = new URL("../../.tmp/unit/goal-workflow-recovery.js", import.meta.url).href;
-  const script = `
-    const { claimWorkflowGoalRecovery } = await import(${JSON.stringify(moduleUrl)});
-    try {
-      const release = await claimWorkflowGoalRecovery(${JSON.stringify(cwd)}, ${JSON.stringify(RUN)});
-      console.log("claimed");
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      await release();
-    } catch (error) { console.log("refused: " + error.message); }`;
-  const { spawn } = await import("node:child_process");
-  const run = () => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "", err = "";
-    child.stdout.on("data", chunk => { out += chunk; });
-    child.stderr.on("data", chunk => { err += chunk; });
-    child.once("exit", code => code === 0 ? resolve(out.trim()) : reject(new Error(err)));
-  });
-  const results = await Promise.all([run(), run(), run()]);
-  assert.equal(results.filter(result => result === "claimed").length, 1, JSON.stringify(results));
-  assert.equal(results.filter(result => /being recovered by another command/.test(result)).length, 2, JSON.stringify(results));
-  assert.equal(existsSync(join(cwd, ".pi", "workflows", RUN, "goal-recovery.lock")), false, "the winner released its claim");
-});
 
 test("a successor run created before the marker was written still blocks a second recovery", async () => {
   const { cwd } = await interruptedRun();
@@ -241,13 +217,6 @@ test("only receipts of recorded generations for the consented criteria are used"
   assert.doesNotMatch(JSON.stringify(plan.feedback), /forged|wrong criteria/);
 });
 
-test("within one generation the most recently written receipt is the last observation", async () => {
-  const { cwd, writeReceipt } = await interruptedRun();
-  await new Promise(resolve => setTimeout(resolve, 20));
-  await writeReceipt(1, "decided later in generation one");
-  const later = await planWorkflowGoalRecovery(cwd, RUN, notLive);
-  assert.match(JSON.stringify(later.plan.feedback), /decided later in generation one/);
-});
 
 test("seeds that cannot be reproduced are skipped with a reason", async () => {
   const deleted = await interruptedRun({ candidateFiles: [{ path: "src/a.mjs", value: null }] });

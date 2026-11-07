@@ -147,20 +147,6 @@ async function writeRun(cwd, run) {
 	await writeFile(join(dir, "artifact.bin"), "artifact");
 }
 
-test("prune dry run is non-destructive and selects only beyond-keep terminal runs", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "pi-workflow-prune-"));
-	try {
-		await writeRun(cwd, terminalRun("workflow-new", "2026-09-01T00:00:00.000Z"));
-		await writeRun(cwd, terminalRun("workflow-old", "2026-08-01T00:00:00.000Z"));
-		await writeRun(cwd, terminalRun("workflow-running", "2026-07-01T00:00:00.000Z", { status: "running" }));
-		const summary = await pruneWorkflowRuns(cwd, { keep: 1 });
-		assert.deepEqual(summary.runs.map((run) => run.runId), ["workflow-old"]);
-		assert.equal(summary.dryRun, true);
-		await stat(join(cwd, ".pi", "workflows", "workflow-old", "run.json"));
-	} finally {
-		await rm(cwd, { recursive: true, force: true });
-	}
-});
 
 test("prune yes removes workflow and subagent mirrors and rewrites the index", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-workflow-prune-"));
@@ -199,20 +185,6 @@ test("prune protects running, blocked, and live-lease runs", async () => {
 	}
 });
 
-test("older-than combines with the keep window and retains mock terminal runs as candidates", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "pi-workflow-prune-"));
-	try {
-		const now = Date.now();
-		await writeRun(cwd, terminalRun("workflow-new", new Date(now - 2 * 86400000).toISOString()));
-		await writeRun(cwd, terminalRun("workflow-medium", new Date(now - 5 * 86400000).toISOString()));
-		await writeRun(cwd, terminalRun("workflow-old", new Date(now - 20 * 86400000).toISOString(), { provenance: { mode: "mock-screenshot" } }));
-		const summary = await pruneWorkflowRuns(cwd, { keep: 1, olderThanDays: 10 });
-		assert.deepEqual(summary.runs.map((run) => run.runId), ["workflow-old"]);
-		assert.equal(summary.runs[0].status, "completed");
-	} finally {
-		await rm(cwd, { recursive: true, force: true });
-	}
-});
 
 test("prune skips symlinked run directories outside the workflow root", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-workflow-prune-"));

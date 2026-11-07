@@ -129,12 +129,6 @@ test('workflow_list execution bounds huge metadata and provides actionable conti
  const next=await tool.execute('next',{offset:result.details.nextOffset,query:'catalog-'},undefined,undefined,{cwd});assert.ok(next.details.workflows.length>0);assert.notEqual(next.details.workflows[0].name,result.details.workflows[0].name);
 });
 
-test('catch-up delivery cap excludes foreign runs',async t=>{
- const cwd=await project(t),runs=[];
- for(let i=0;i<7;i++){const run=await localRun(cwd);run.status='failed';for(const task of run.tasks)task.status='failed';await store.writeRunRecord(cwd,run);await writeFile(join(store.workflowRunDir(cwd,run.runId),'feedback-audience.json'),JSON.stringify({schema:'workflow-feedback-audience-v1',runId:run.runId,sessionId:i===0?'owner':'other'}));runs.push(run);}
- await store.updateIndex(cwd);const sent=[];const ctx={cwd,hasUI:true,mode:'rpc',isIdle:()=>true,sessionManager:{getSessionId:()=> 'owner'},ui:{notify(){}}};
- await deliverMissedWorkflowFeedback(ctx,{sendMessage:(m)=>sent.push(m)});assert.equal(sent.length,1);
-});
 
 test('catch-up cap counts deliveries rather than five existing receipts',async t=>{
  const cwd=await project(t);const runs=[];

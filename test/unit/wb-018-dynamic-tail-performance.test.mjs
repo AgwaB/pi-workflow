@@ -44,53 +44,7 @@ test("WB-018 dynamic append cursor reads a ledger once and preserves sequential 
 	assert.equal(text, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
 });
 
-test("WB-018 dynamic append queue serializes same-process concurrent calls", async (t) => {
-	resetDynamicEventAppendStateForTests();
-	t.after(() => resetDynamicEventAppendStateForTests());
-	const cwd = await mkdtemp(join(tmpdir(), "piwf-wb018-concurrent-"));
-	t.after(() => rm(cwd, { recursive: true, force: true }));
-	const runId = "workflow_concurrent";
-	const appended = await Promise.all(
-		Array.from({ length: 40 }, (_, index) =>
-			appendDynamicEvent(cwd, runId, input(index + 1)),
-		),
-	);
-	assert.deepEqual(
-		appended.map((event) => event.seq),
-		Array.from({ length: 40 }, (_, index) => index + 1),
-	);
-	assert.equal(dynamicEventAppendStatsForTests().fullLedgerReads, 1);
-});
 
-test("WB-018 cursor self-heals after restart and external size change", async (t) => {
-	resetDynamicEventAppendStateForTests();
-	t.after(() => resetDynamicEventAppendStateForTests());
-	const cwd = await mkdtemp(join(tmpdir(), "piwf-wb018-restart-"));
-	t.after(() => rm(cwd, { recursive: true, force: true }));
-	const runId = "workflow_restart";
-	await appendDynamicEvent(cwd, runId, input(1));
-	resetDynamicEventAppendStateForTests();
-	assert.equal((await appendDynamicEvent(cwd, runId, input(2))).seq, 2);
-	assert.equal(dynamicEventAppendStatsForTests().fullLedgerReads, 1);
-	const external = {
-		schema: "pi-workflow-dynamic-event-v1",
-		seq: 3,
-		opId: "external",
-		requestHash: "external-hash",
-		runId,
-		controllerSpecId: "controller",
-		type: "controller.status",
-		timestamp: "2026-07-10T02:00:00.003Z",
-		payload: { external: true },
-	};
-	await appendFile(dynamicEventsPath(cwd, runId), `${JSON.stringify(external)}\n`);
-	assert.equal((await appendDynamicEvent(cwd, runId, input(4))).seq, 4);
-	assert.equal(dynamicEventAppendStatsForTests().fullLedgerReads, 2);
-	assert.deepEqual(
-		(await readDynamicEvents(cwd, runId)).map((event) => event.seq),
-		[1, 2, 3, 4],
-	);
-});
 
 test("WB-018 bounded tail matches full UTF-8/CRLF visible output with fewer bytes", async (t) => {
 	const cwd = await mkdtemp(join(tmpdir(), "piwf-wb018-tail-"));

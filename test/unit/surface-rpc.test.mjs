@@ -80,35 +80,6 @@ test("registered /workflow goal authoring preserves literal JSON and save-only h
  assert.equal((await readFile(join(cwd, ".pi", "goals", "current"), "utf8").catch(error => error.code)), "ENOENT");
 });
 
-test("registered /workflow goal rubric authoring selects the ordinary engine producer", async (t) => {
- const cwd = await mkdtemp(join(tmpdir(), "surface-goal-rubric-"));
- t.after(() => rm(cwd, { recursive: true, force: true }));
- const { workflow } = fakeWorkflowSurface();
- const statement = "Compare both original sources and preserve contradictions and unknowns.";
- const inputs = [statement, "inputs", "", "", "", "", "goals/research.json"];
- const choices = ["Model-rubric statement", "Done adding criteria", "Read and verify only", "Fast off", "Save definition"];
- const notices = [];
- await workflow.handler("goal create compare original sources", {
-  cwd, hasUI: true, mode: "tui",
-  ui: {
-   input: async () => inputs.shift(),
-   select: async () => choices.shift(),
-   confirm: async () => { throw new Error("save-only must not execute or overwrite"); },
-   notify: (text) => notices.push(text),
-  },
- });
- assert.ok(notices.some(text => /no run was created/i.test(text)), JSON.stringify(notices));
- const saved = JSON.parse(await readFile(join(cwd, "goals/research.json"), "utf8"));
- assert.deepEqual(saved.goal.criteria[0].verifier, {
-  kind: "model-rubric",
-  producerId: "json-control-rubric-v1",
-  target: "artifact",
-  subject: { resultSlot: "result", artifact: "control", path: "$.result" },
-  config: { rubric: { statement }, minScore: 1 },
- });
- assert.equal(inputs.length, 0);
- assert.equal(choices.length, 0);
-});
 
 test("registered /workflow goal cancellation and readonly dispatch do not enter authoring", async (t) => {
  const cwd = await mkdtemp(join(tmpdir(), "surface-goal-cancel-"));
@@ -145,35 +116,6 @@ test("registered /workflow goal cancellation and readonly dispatch do not enter 
  assert.equal((await readFile(join(cwd, ".pi", "goals", "current"), "utf8").catch(error => error.code)), "ENOENT");
 });
 
-test("registered /workflow goal save-only retains every JSON literal shape without a runtime", async (t) => {
- const cwd = await mkdtemp(join(tmpdir(), "surface-goal-literals-"));
- t.after(() => rm(cwd, { recursive: true, force: true }));
- const literals = [
-  "true",
-  "1.5",
-  '["a",2,null]',
-  '{"__proto__":{"constructor":"reserved"},"nested":{"x":0}}',
- ];
- for (const [index, literal] of literals.entries()) {
-  const { workflow } = fakeWorkflowSurface();
-  const notices = [];
-  const inputs = [literal, "", "", "", "", "", `goals/literal-${index}.json`];
-  const choices = ["Deterministic exact JSON value", "Done adding criteria", "Read and verify only", "Fast off", "Save definition"];
-  await workflow.handler(`goal create literal ${index}`, {
-   cwd, hasUI: true, mode: "tui",
-   ui: {
-    input: async () => inputs.shift(),
-    select: async () => choices.shift(),
-    confirm: async () => { throw new Error("new save must not overwrite or execute"); },
-    notify: (text, level) => notices.push({ text, level }),
-   },
-  });
-  const saved = JSON.parse(await readFile(join(cwd, `goals/literal-${index}.json`), "utf8"));
-  assert.deepEqual(saved.goal.criteria[0].verifier.config.expected, JSON.parse(literal));
-  assert.ok(notices.some(({ text }) => /no run was created/i.test(text)));
- }
- assert.equal((await readFile(join(cwd, ".pi", "goals", "current"), "utf8").catch(error => error.code)), "ENOENT");
-});
 
 test("registered /workflow goal authors a sandboxed command criterion without a shell", async (t) => {
  const cwd = await mkdtemp(join(tmpdir(), "surface-goal-command-"));

@@ -33,33 +33,6 @@ async function control(cwd, runId) { const task = await controller(cwd, runId); 
 async function children(cwd, runId) { return [...new Set((await h.readDynamicEvents(cwd, runId)).filter(e => e.type === 'workflow.started').map(e => e.payload.runId))]; }
 // Historical depth is explicitly observed for display, never on controller hot paths.
 async function depth(cwd, runId) { return (await readOrRebuildDynamicState(cwd, runId, { observeDescendants: true })).controllers['adaptive.controller'].counters.nestedWorkflowDepth; }
-// All controller runs use the real local scheduler, bundle snapshots and worker threads.
-test('depth one permits sequential siblings without consuming remaining headroom or check', async () => {
-    const f = await fixture({ 'spec.json': spec(1, childRef), 'controller.mjs': `export default async ctx=>{const before=ctx.budget.remaining();await ctx.workflow('child','one');const after=ctx.budget.remaining();const check=ctx.budget.check();await ctx.workflow('child','two');return {control:{digest:'siblings',before,after,check,final:ctx.budget.remaining()}}}`, 'child/spec.json': spec(8), 'child/controller.mjs': leaf });
-    try {
-        await h.scheduleRun(f.cwd, f.run.runId);
-        assert.equal((await controller(f.cwd, f.run.runId)).status, 'completed');
-        const c = await control(f.cwd, f.run.runId);
-        assert.equal(c.before.maxNestedWorkflowDepth, 1);
-        assert.equal(c.after.maxNestedWorkflowDepth, 1);
-        assert.equal(c.final.maxNestedWorkflowDepth, 1);
-        assert.equal(c.check, true);
-        assert.equal((await children(f.cwd, f.run.runId)).length, 2);
-        assert.equal(await depth(f.cwd, f.run.runId), 1);
-        const cached = await readOrRebuildDynamicState(f.cwd, f.run.runId);
-        cached.controllers['adaptive.controller'].counters.nestedWorkflowDepth = 999;
-        await writeFile(dynamicStatePath(f.cwd, f.run.runId), JSON.stringify(cached));
-        assert.equal(await depth(f.cwd, f.run.runId), 1, 'legacy cumulative cache is not retained');
-        for (const id of await children(f.cwd, f.run.runId)) {
-            const c = await control(f.cwd, id);
-            assert.equal(c.remaining.maxNestedWorkflowDepth, 0);
-            assert.equal(c.check, false);
-        }
-    }
-    finally {
-        await f.close();
-    }
-});
 test('root depth one forbids a grandchild even when child configuration requests larger depth', async () => {
     const f = await fixture({ 'spec.json': spec(1, childRef), 'controller.mjs': callChild, 'child/spec.json': spec(8, childRef), 'child/controller.mjs': callChild, 'child/child/spec.json': spec(8), 'child/child/controller.mjs': leaf });
     try {

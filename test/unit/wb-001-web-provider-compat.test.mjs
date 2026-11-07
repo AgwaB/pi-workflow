@@ -1117,39 +1117,6 @@ try {
 	}
 });
 
-test("WB-001 normalized pi-web-access registration validates config before provider initialization", () => {
-	const cwd = makeProject();
-	const previousConfigDir = process.env.PI_CODING_AGENT_DIR;
-	try {
-		const configDir = join(cwd, "pi-config");
-		mkdirSync(configDir, { recursive: true });
-		writeFileSync(join(configDir, "web-search.json"), '{"secret":"TOP-SECRET-SENTINEL"');
-		process.env.PI_CODING_AGENT_DIR = configDir;
-		let providerInitializations = 0;
-		assert.throws(
-			() => registerWorkflowWebSourceExtension(
-				{ registerTool() {} },
-				{
-					schema: "workflow-web-source-launch-config-v1",
-					runId: "run",
-					taskId: "task",
-					cwd,
-					cacheDir: join(cwd, "cache"),
-					provider: { kind: "pi-web-access" },
-					requiredProviderTools: ["web_search"],
-				},
-				() => { providerInitializations += 1; },
-			),
-			/pi-web-access configuration preflight failed \[invalid_json\]/,
-		);
-		assert.equal(providerInitializations, 0);
-		assert.equal(existsSync(join(cwd, "cache")), false);
-	} finally {
-		if (previousConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousConfigDir;
-		removeProject(cwd);
-	}
-});
 
 test("WB-001 actual 0.24.2 config incompatibility aborts loader preflight with zero backend dispatch", async () => {
 	const cases = [

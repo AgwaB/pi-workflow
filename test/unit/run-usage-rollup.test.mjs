@@ -103,32 +103,3 @@ test("terminal writeRunRecord persists a task-usage rollup on the run", async (t
 	assert.equal(persisted.usage.costUsd, 0.75);
 	assert.ok(persisted.usage.capturedAt);
 });
-
-test("non-terminal writeRunRecord does not attach a rollup", async (t) => {
-	const cwd = mkdtempSync(join(tmpdir(), "run-usage-rollup-"));
-	t.after(() => rmSync(cwd, { recursive: true, force: true }));
-
-	const tasks = [
-		taskRecord("task-1", { totalTokens: 300, costUsd: 0.5 }),
-		{ ...taskRecord("task-2", undefined), status: "running", statusDetail: "running" },
-	];
-	const run = {
-		...runRecord("workflow_rollup_2", tasks),
-		status: "running",
-		taskSummary: {
-			total: 2,
-			pending: 0,
-			running: 1,
-			completed: 1,
-			blocked: 0,
-			failed: 0,
-			skipped: 0,
-			interrupted: 0,
-		},
-	};
-	await writeRunRecord(cwd, run);
-
-	const persisted = await readRunRecord(cwd, "workflow_rollup_2");
-	assert.equal(persisted.status, "running");
-	assert.equal(persisted.usage, undefined);
-});

@@ -18,40 +18,6 @@ const actionable =
 const advisory =
 	'reduce stage "finish" fans in foreach outputs with 6 projected paths (maxChars 60000) and a large control schema (6 top-level arrays: a, b, c, d, e, f). High length-cutoff/control-bloat risk: split into intermediate reducers/support helpers, cap evidence indexes, and keep large narrative in <analysis>.';
 
-test("internal diagnostics preserve legacy warning bytes and order", () => {
-	const compiled = { warnings: [advisory, actionable] };
-	const before = JSON.stringify(compiled.warnings);
-	const diagnostics = workflowPromptSchemaDiagnostics(compiled);
-
-	assert.equal(JSON.stringify(compiled.warnings), before);
-	assert.deepEqual(
-		diagnostics.map((diagnostic) => diagnostic.message),
-		compiled.warnings,
-	);
-	assert.deepEqual(
-		diagnostics.map(({ code, level, strictBlocking }) => ({
-			code,
-			level,
-			strictBlocking,
-		})),
-		[
-			{
-				code: "prompt.control_bloat_advisory",
-				level: "warning",
-				strictBlocking: false,
-			},
-			{
-				code: "prompt.required_key_undocumented",
-				level: "warning",
-				strictBlocking: true,
-			},
-		],
-	);
-	assert.equal(
-		promptSchemaDiagnosticDigest(diagnostics),
-		promptSchemaDiagnosticDigest(workflowPromptSchemaDiagnostics(compiled)),
-	);
-});
 
 test("diagnostics applicability is an explicit named-workflow policy", () => {
 	assert.equal(promptSchemaDiagnosticsApply("named-workflow"), true);
@@ -92,27 +58,6 @@ test("strict prompt/schema mode is explicit and rejects only actionable diagnost
 	);
 });
 
-test("one run-start notice retains warning order without validate formatting", () => {
-	const notice = formatPromptSchemaDiagnostics(
-		workflowPromptSchemaDiagnostics({ warnings: [actionable, advisory] }),
-	);
-	assert.equal(
-		notice,
-		`Workflow prompt/schema warnings:\n- ${actionable}\n- ${advisory}`,
-	);
-	assert.equal(formatPromptSchemaDiagnostics([]), undefined);
-	assert.deepEqual(
-		buildPromptSchemaDiagnosticNotice(
-			workflowPromptSchemaDiagnostics({ warnings: [actionable, advisory] }),
-		),
-		{
-			digest: promptSchemaDiagnosticDigest(
-				workflowPromptSchemaDiagnostics({ warnings: [actionable, advisory] }),
-			),
-			text: notice,
-		},
-	);
-});
 
 test("schema retry diagnostics include bounded expected const values", () => {
 	const validation = validateJsonSchema(

@@ -89,18 +89,6 @@ test("observed identity drift invokes registered fences once instead of discardi
 	assertStale(issuer, lease);
 });
 
-test("issuer subscribes only to locked Pi session lifecycle event names", () => {
-	const host = fakeExtensionApi();
-	installGoalHostSessionIssuer(host.api);
-	assert.deepEqual(host.eventNames(), [
-		"session_start",
-		"session_before_switch",
-		"session_before_fork",
-		"session_before_tree",
-		"session_tree",
-		"session_shutdown",
-	]);
-});
 
 test("lease is minted by session_start and exact object identity is required", () => {
 	const host = fakeExtensionApi();

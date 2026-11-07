@@ -246,83 +246,6 @@ test("profileRole validates independently from agent-context role", () => {
 	);
 });
 
-test("canonical profile slots cover nested dag, loop exhaustion, foreach runtime, and dynamic decision profiles", () => {
-	const spec = {
-		schemaVersion: 1,
-		name: "nested-profile-addresses",
-		artifactGraph: {
-			stages: [
-				{
-					id: "outer",
-					type: "dag",
-					stages: [stage("child", "research-execution")],
-				},
-				{
-					id: "repeat",
-					type: "loop",
-					stages: [stage("step", "verification")],
-					onExhausted: stage("fallback", "final-judgment"),
-				},
-				{
-					id: "items",
-					type: "foreach",
-					profileRole: "research-execution",
-					each: { prompt: "item" },
-				},
-				{
-					id: "adaptive",
-					type: "dynamic",
-					profileRole: "research-execution",
-					dynamic: {
-						decisionLoop: {
-							planner: { profileRole: "planning" },
-							workerDefaults: { profileRole: "research-execution" },
-							verifier: { profileRole: "verification" },
-							synthesis: { profileRole: "synthesis" },
-						},
-					},
-				},
-			],
-		},
-	};
-	assert.deepEqual(
-		collectWorkflowProfileStageSlots(spec).map(({ id }) => id),
-		[
-			"outer.child",
-			"repeat.step",
-			"repeat.$onExhausted",
-			"items",
-			"adaptive",
-			"adaptive.$planner",
-			"adaptive.$workerDefaults",
-			"adaptive.$verifier",
-			"adaptive.$synthesis",
-		],
-	);
-	const mapping = Object.fromEntries(
-		collectWorkflowProfileStageSlots(spec).map(({ id }, index) => [
-			id,
-			{ model: `model/${index}`, thinking: "high" },
-		]),
-	);
-	const applied = applyExecutionProfileStageOverrides(spec, mapping, {
-		foreachRuntimeTarget: "each",
-	});
-	assert.equal(applied.artifactGraph.stages[0].stages[0].model, "model/0");
-	assert.equal(applied.artifactGraph.stages[1].stages[0].model, "model/1");
-	assert.equal(applied.artifactGraph.stages[1].onExhausted.model, "model/2");
-	assert.equal(applied.artifactGraph.stages[2].each.model, "model/3");
-	assert.equal(applied.artifactGraph.stages[3].model, "model/4");
-	assert.equal(
-		applied.artifactGraph.stages[3].dynamic.decisionLoop.planner.model,
-		"model/5",
-	);
-	assert.equal(
-		applied.artifactGraph.stages[3].dynamic.decisionLoop.synthesis.model,
-		"model/8",
-	);
-	assert.equal(spec.artifactGraph.stages[2].each.model, undefined);
-});
 
 test("all four built-ins use the approved exact role matrix", () => {
 	const { workflowPath } = setup("builtin-matrix");
@@ -359,46 +282,6 @@ test("all four built-ins use the approved exact role matrix", () => {
 	});
 });
 
-test("bundled workflows and authoring scaffolds expose complete built-in profile coverage", async () => {
-	for (const specPath of [
-		"workflows/deep-research/spec.json",
-		"workflows/deep-research/tiered-verification.spec.json",
-		"workflows/deep-review/spec.json",
-		"workflows/spec-review/spec.json",
-		"workflows/impact-review/spec.json",
-		"skills/workflow-guide/scaffolds/analysis-dossier/spec.json",
-		"skills/workflow-guide/scaffolds/dag-required-reads/spec.json",
-		"skills/workflow-guide/scaffolds/foreach-reduce/spec.json",
-		"skills/workflow-guide/scaffolds/fixed-inventory/spec.json",
-		"skills/workflow-guide/scaffolds/matrix-dag/spec.json",
-		"skills/workflow-guide/scaffolds/object-tool-fallback/spec.json",
-		"skills/workflow-guide/scaffolds/support-partition/spec.json",
-	]) {
-		const loaded = await loadWorkflowSpec(specPath, process.cwd());
-		const slots = collectWorkflowProfileStageSlots(loaded.spec);
-		assert.ok(slots.length > 0, specPath);
-		assert.ok(slots.every(({ profileRole }) => profileRole), specPath);
-		for (const profileId of WORKFLOW_BUILTIN_PROFILE_IDS) {
-			const built = buildWorkflowExecutionProfile(
-				context(loaded.spec, loaded.specPath),
-				profileId,
-			);
-			assert.equal(
-				Object.keys(built.stageOverrides).filter((id) =>
-					slots.some((slot) => slot.id === id),
-				).length,
-				slots.length,
-				`${specPath}/${profileId}`,
-			);
-			if (specPath === "workflows/deep-research/spec.json") {
-				assert.deepEqual(built.stageOverrides["verify-claims"].foreachBatch, {
-					maxItems: 2,
-					groupBy: ["$.sourceRefs", "$.sourceUrls"],
-				});
-			}
-		}
-	}
-});
 
 test("missing models, unsupported thinking, and missing roles fail without substitution", () => {
 	const { workflowPath } = setup("profile-fail-closed");

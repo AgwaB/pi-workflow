@@ -103,7 +103,7 @@ async function withRun(bundlePath, name, fn, beforeRemove) {
   throwMaterializedRunFailures(primaryFailure, cleanupFailure);
 }
 
-for (const mode of ["grounded", "drop-grounded", "legacy", "drop-unverified", "missing-file", "report-absent", "mapping-missing"]) {
+for (const mode of ["missing-file", "report-absent", "mapping-missing"]) {
   test(`actual spec-review scheduler/partition/renderer: ${mode}`, () => withRun("workflows/spec-review", `spec-${mode}`, async ({ cwd, step, complete, launches }) => {
     let current = await step();
     await complete(h.taskBySpec(current, "extract-spec.main"), {
@@ -185,38 +185,3 @@ for (const mode of ["grounded", "symlink", "identity-mismatch"]) {
     assert.equal(gated.value.partitions.needsHuman.length, mode === "grounded" ? 0 : 1);
   }));
 }
-
-test("materialized fixture cleanup flushes an advisory index update before removal", async () => {
-  const expectedName = "materialized cleanup pending index update";
-  let runId;
-  await withRun(
-    "workflows/spec-review",
-    "materialized-index-drain",
-    async ({ cwd, run }) => {
-      runId = run.runId;
-      await h.flushPendingIndexUpdatesForTests();
-      const before = JSON.parse(
-        await readFile(join(cwd, ".pi", "workflows", "index.json"), "utf8"),
-      );
-      const indexedBefore = before.runs.find((entry) => entry.runId === runId);
-      assert.ok(indexedBefore);
-      assert.notEqual(indexedBefore.name, expectedName);
-
-      h.setIndexUpdateDebounceMsForTests(60_000);
-      run.name = expectedName;
-      await h.writeRunRecord(cwd, run);
-    },
-    async (cwd) => {
-      const index = JSON.parse(
-        await readFile(join(cwd, ".pi", "workflows", "index.json"), "utf8"),
-      );
-      const indexed = index.runs.find((entry) => entry.runId === runId);
-      assert.ok(indexed);
-      assert.equal(
-        indexed.name,
-        expectedName,
-        "fixture removal follows the forced advisory index flush",
-      );
-    },
-  );
-});

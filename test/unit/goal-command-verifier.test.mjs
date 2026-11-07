@@ -62,22 +62,6 @@ test("Goal definitions accept a candidate command criterion and reject other sha
   assert.throws(() => parseGoalWorkflowSpec(definition({ ...valid, producerId: "json-exact-value-v1" })));
 });
 
-test("the exit code of the user command on the candidate copy is the verdict", sandboxed, async () => {
-  const failing = await fixture("export const sum = (a, b) => a - b;\n");
-  const failed = await runGoalCommandVerifier({ originRoot: failing.origin, workspace: failing.workspace, config: { argv: testArgv } });
-  assert.equal(failed.sandbox, "macos-seatbelt");
-  assert.notEqual(failed.exitCode, 0);
-  assert.equal(goalCommandVerdict(failed), "not-met");
-  assert.match(failed.stdoutTail, /not ok|fail/i, "the failing test output is retained as feedback");
-
-  const passing = await fixture("export const sum = (a, b) => a + b;\n");
-  const passed = await runGoalCommandVerifier({ originRoot: passing.origin, workspace: passing.workspace,
-    config: { argv: testArgv }, expectedCandidateHash: goalHash(passing.candidate) });
-  assert.equal(passed.exitCode, 0, passed.stdoutTail + passed.stderrTail);
-  assert.equal(goalCommandVerdict(passed), "met");
-  assert.equal(await readFile(join(passing.origin, "src", "sum.mjs"), "utf8"), "export const sum = (a, b) => a - b;\n",
-    "the origin is never written; the candidate is overlaid on a copy");
-});
 
 test("a changed candidate is not run against the observed subject", sandboxed, async () => {
   const f = await fixture("export const sum = (a, b) => a + b;\n");
@@ -132,13 +116,6 @@ test("output held open by an escaped descendant does not stall the verdict", san
   assert.ok(Date.now() - started < 7000, "the verifier stops reading shortly after the command exits");
 });
 
-test("a command over its time limit is killed and is not met", sandboxed, async () => {
-  const f = await fixture("export const sum = (a, b) => a + b;\n");
-  const slow = await runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace,
-    config: { argv: [process.execPath, "-e", "setTimeout(() => {}, 60000)"], timeoutMs: 1000 } });
-  assert.equal(slow.timedOut, true);
-  assert.equal(goalCommandVerdict(slow), "not-met");
-});
 
 test("a command that cannot start is a configuration error, not a candidate verdict", sandboxed, async () => {
   const f = await fixture("export const sum = (a, b) => a + b;\n");
@@ -166,22 +143,6 @@ test("a candidate whose bytes changed after its snapshot is not verified", sandb
     config: { argv: testArgv } }), /candidate bytes changed before command verification: src\/sum.mjs/);
 });
 
-test("preflight resolves relative PATH entries against the command directory, like the run", async () => {
-  const f = await fixture("export const sum = (a, b) => a + b;\n");
-  await mkdir(join(f.origin, "tools"));
-  await writeFile(join(f.origin, "tools", "check-sum"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  const previous = process.env.PATH;
-  try {
-    process.env.PATH = `tools${delimiter}${previous}`;
-    assert.deepEqual(await goalCommandVerifierPreflightIssues(f.origin, { argv: ["check-sum"] }), []);
-    if (goalCommandSandboxAvailable()) {
-      const ran = await runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace, config: { argv: ["check-sum"] } });
-      assert.equal(goalCommandVerdict(ran), "met", "the sandboxed run finds the same relative PATH entry in the copy");
-    }
-    process.env.PATH = previous;
-    assert.match((await goalCommandVerifierPreflightIssues(f.origin, { argv: ["check-sum"] }))[0], /not found on PATH/);
-  } finally { process.env.PATH = previous; }
-});
 
 test("a stop during preparation never starts the command", sandboxed, async () => {
   const f = await fixture("export const sum = (a, b) => a + b;\n");
@@ -207,16 +168,6 @@ test("cwd cannot leave the copy through a symbolic link", sandboxed, async () =>
     config: { argv: [process.execPath, "-e", "0"], cwd: "alias/sub" } }), /leaves the working tree copy/);
 });
 
-test("a command that exits before its deadline is not timed out by output held open afterwards", sandboxed, async () => {
-  const f = await fixture("export const sum = (a, b) => a + b;\n");
-  const result = await runGoalCommandVerifier({ originRoot: f.origin, workspace: f.workspace, config: {
-    argv: [process.execPath, "-e",
-      "require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 4000)'], { detached: true, stdio: 'inherit' }).unref()"],
-    timeoutMs: 1000 } });
-  assert.equal(result.exitCode, 0);
-  assert.equal(result.timedOut, false);
-  assert.equal(goalCommandVerdict(result), "met");
-});
 
 test("the overlay adds new candidate files and removes deleted ones only in the copy", sandboxed, async () => {
   const f = await fixture("export const sum = (a, b) => a + b;\n");

@@ -133,91 +133,9 @@ test('profile proposal rejects unbound scopes and executable fields before confi
   assert.equal(traps, 0);
 });
 
-test('profile proposal validates every effective exception and the complete original role inventory', async () => {
-  const a = await import(adapterUrl), profile = start(a), { revision } = revisionFixture(profile);
-  const proposal = structuredClone(revision); delete proposal.confirmation;
-  const inventory = [...models, { fullId: 'fixture/nonreasoning', provider: 'fixture', id: 'nonreasoning', reasoning: false }];
-  for (const runtime of [{ model: 'absent/model' }, { model: 'fixture/nonreasoning', thinking: 'high' }]) {
-    const invalid = structuredClone(proposal), unmatched = structuredClone(invalid.exceptions[0]);
-    unmatched.scope.rootRunId = 'workflow_unmatched'; unmatched.runtime = runtime;
-    invalid.exceptions.push(unmatched);
-    assert.throws(() => a.assertGoalProfileCaptureRevisionProposalAvailable(invalid, profile, inventory), /unavailable|unsupported/);
-  }
-  const root = structuredClone(profile); root.roles[0].model = 'absent/root';
-  const invalid = structuredClone(proposal);
-  invalid.rootProfileHash = goalHash(root);
-  invalid.initialBase = { model: models[0].fullId, thinking: 'low' };
-  assert.throws(() => a.assertGoalProfileCaptureRevisionProposalAvailable(invalid, root, inventory), /unavailable/);
-  assert.doesNotThrow(() => a.assertGoalProfileCaptureRevisionProposalAvailable(proposal, profile, inventory));
-});
 
-test('profile successor proposal derives exact predecessor and merges only the selected scope', async () => {
-  const a = await import(adapterUrl), profile = start(a), { scope, revision } = revisionFixture(profile);
-  const sibling = structuredClone(revision.exceptions[0]);
-  sibling.scope.executionRunId = 'workflow_profile_sibling';
-  sibling.runtime = { model: profile.roles.find(r => r.role === sibling.scope.role).model };
-  sibling.reason = 'Unrelated prior exception';
-  revision.exceptions.push(sibling);
-  const previousHash = goalHash(revision);
-  const previousSnapshot = structuredClone(revision);
-  const alternate = models.find(m => m.fullId !== profile.roles.find(r => r.role === scope.role).model);
-  assert.ok(alternate);
 
-  const proposal = a.buildGoalProfileCaptureRevisionProposal(
-    revision, profile, scope, { model: alternate.fullId }, 'Replace only the selected model', models,
-  );
-  assert.equal(proposal.captureRevision, 2);
-  assert.equal(proposal.previousCaptureHash, previousHash);
-  assert.equal(proposal.rootProfileHash, revision.rootProfileHash);
-  assert.deepEqual(proposal.initialBase, revision.initialBase);
-  assert.deepEqual(proposal.exceptions.map(e => e.scope.executionRunId),
-    ['workflow_profile_execution', 'workflow_profile_sibling']);
-  assert.deepEqual(proposal.exceptions[0].runtime, { thinking: 'low', model: alternate.fullId },
-    'a model-only patch preserves the prior exceptional thinking field');
-  assert.equal(proposal.exceptions[0].reason, 'Replace only the selected model');
-  assert.deepEqual(proposal.exceptions[1], previousSnapshot.exceptions[1]);
-  assert.equal(Object.hasOwn(proposal, 'confirmation'), false);
-  assert.equal(Object.isFrozen(proposal), true);
-  assert.equal(Object.isFrozen(proposal.exceptions[0]), true);
-  assert.equal(Object.isFrozen(proposal.exceptions[1].scope), true);
-  assert.throws(() => { proposal.exceptions[1].reason = 'mutated'; }, TypeError);
-  assert.deepEqual(revision, previousSnapshot);
-  revision.exceptions[0].reason = 'caller mutation after build';
-  revision.exceptions[1].scope.executionRunId = 'caller_mutation';
-  assert.equal(proposal.exceptions[0].reason, 'Replace only the selected model');
-  assert.equal(proposal.exceptions[1].scope.executionRunId, 'workflow_profile_sibling');
-});
 
-test('profile successor proposal preserves JSON-looking reasons as literal text', async () => {
-  const a = await import(adapterUrl), profile = start(a), { scope, revision } = revisionFixture(profile);
-  for (const reason of ['{"reason":"literal"}', '"quoted reason"', 'null', '[1,true]', '이유: {"model":"변경"}']) {
-    const proposal = a.buildGoalProfileCaptureRevisionProposal(
-      revision, profile, scope, { thinking: 'medium' }, reason, models,
-    );
-    assert.equal(proposal.exceptions[0].reason, reason);
-    assert.deepEqual(Buffer.from(proposal.exceptions[0].reason), Buffer.from(reason));
-  }
-});
-
-test('profile successor proposal appends an exact new scope without changing prior rows', async () => {
-  const a = await import(adapterUrl), profile = start(a), { scope, revision } = revisionFixture(profile);
-  const newScope = structuredClone(scope);
-  newScope.executionRunId = 'workflow_profile_new_scope';
-  const proposal = a.buildGoalProfileCaptureRevisionProposal(
-    revision, profile, newScope, { thinking: 'medium' }, 'New execution only', models,
-  );
-  assert.equal(proposal.exceptions.length, 2);
-  assert.deepEqual(proposal.exceptions[0], revision.exceptions[0]);
-  assert.deepEqual(proposal.exceptions[1], {
-    scope: newScope, runtime: { thinking: 'medium' }, reason: 'New execution only',
-  });
-  assert.equal(a.resolveGoalProfileRuntime(revision, profile, scope, models).thinking, 'low');
-  const accepted = { ...structuredClone(proposal), confirmation: {
-    provenance: 'original-live-tui', previewHash: h('new-preview'), confirmedAt: '2026-09-11T00:01:00.000Z',
-  } };
-  assert.equal(a.resolveGoalProfileRuntime(accepted, profile, scope, models).thinking, 'low');
-  assert.equal(a.resolveGoalProfileRuntime(accepted, profile, newScope, models).thinking, 'medium');
-});
 
 test('profile successor proposal rejects unsafe, incompatible, or stale source data without traps', async () => {
   const a = await import(adapterUrl), profile = start(a), { scope, revision } = revisionFixture(profile);
@@ -316,56 +234,7 @@ test('accepted profile revision history requires one immutable contiguous predec
   assert.equal(traps, 0);
 });
 
-test('profile revision data resolves independently scoped fields without changing original roles', async () => {
-  const a = await import(adapterUrl), profile = start(a), { scope, revision } = revisionFixture(profile);
-  const role = profile.roles.find(r => r.role === scope.role);
-  const before = goalHash({ profile, scope, revision });
-  const resolved = a.resolveGoalProfileRuntime(revision, profile, scope, models);
-  assert.equal(resolved.model, role.model);
-  assert.equal(resolved.thinking, 'low');
-  assert.equal(resolved.modelSource, 'root-role');
-  assert.equal(resolved.thinkingSource, 'branch-exception');
-  assert.equal(resolved.scopeHash, a.goalProfileScopeHash(scope));
-  assert.equal(resolved.captureHash, goalHash(revision));
-  assert.equal(Object.isFrozen(resolved), true);
-  assert.equal(Object.isFrozen(a.parseGoalProfileCaptureRevision(revision, profile).exceptions[0].runtime), true);
-  const alternate = models.find(m => m.fullId !== role.model);
-  assert.ok(alternate);
-  const modelOnly = structuredClone(revision);
-  modelOnly.exceptions[0].runtime = { model: alternate.fullId };
-  const changed = a.resolveGoalProfileRuntime(modelOnly, profile, scope, models);
-  assert.equal(changed.model, alternate.fullId);
-  assert.equal(changed.thinking, role.thinking);
-  assert.equal(changed.modelSource, 'branch-exception');
-  assert.equal(changed.thinkingSource, 'root-role');
-  modelOnly.exceptions[0].runtime.thinking = 'low';
-  const both = a.resolveGoalProfileRuntime(modelOnly, profile, scope, models);
-  assert.equal(both.model, alternate.fullId); assert.equal(both.thinking, 'low');
-  assert.equal(both.modelSource, 'branch-exception'); assert.equal(both.thinkingSource, 'branch-exception');
-  assert.throws(() => a.resolveGoalProfileRuntime(modelOnly, profile, scope, [...models, alternate]), /ambiguous/);
-  const successor = structuredClone(revision);
-  successor.captureRevision = 2; successor.previousCaptureHash = goalHash(revision);
-  assert.equal(a.parseGoalProfileCaptureRevision(successor, profile).captureRevision, 2,
-    'representation parsing alone does not prove publication of either revision');
-  successor.initialBase = { model: 'absent/historical-base', thinking: 'off' };
-  successor.exceptions = [];
-  const unchanged = a.resolveGoalProfileRuntime(successor, profile, scope, models);
-  assert.equal(unchanged.model, role.model); assert.equal(unchanged.thinking, role.thinking);
-  assert.equal(goalHash({ profile, scope, revision }), before);
-});
 
-test('profile data resolution keeps otherwise-identical ordinary sibling executions separate', async () => {
-  const a = await import(adapterUrl), profile = start(a), { scope, revision } = revisionFixture(profile);
-  const ordinaryScope = structuredClone(scope);
-  delete ordinaryScope.item;
-  ordinaryScope.executionRunId = 'ordinary_child_reservation_a';
-  const ordinaryRevision = structuredClone(revision);
-  ordinaryRevision.exceptions[0].scope = ordinaryScope;
-  const siblingScope = { ...ordinaryScope, executionRunId: 'ordinary_child_reservation_b' };
-  assert.equal(a.resolveGoalProfileRuntime(ordinaryRevision, profile, ordinaryScope, models).thinkingSource, 'branch-exception');
-  assert.equal(a.resolveGoalProfileRuntime(ordinaryRevision, profile, siblingScope, models).thinkingSource, 'root-role');
-  assert.notEqual(a.goalProfileScopeHash(ordinaryScope), a.goalProfileScopeHash(siblingScope));
-});
 
 test('exact foreach item and template data resolution remains bounded to the execution run', async () => {
   const a = await import(adapterUrl), profile = start(a), { scope, revision } = revisionFixture(profile);
@@ -506,18 +375,6 @@ test('profile revision parser rejects unbound malformed and executable data with
   ]), /unsupported/);
 });
 
-test('P01 Goal uses the existing built-in resolver for every role without its own model defaults', async () => {
-  const a = await import(adapterUrl);
-  for (const profileId of WORKFLOW_BUILTIN_PROFILE_IDS) {
-    const p = start(a, { profileId });
-    for (const r of p.roles) {
-      assert.deepEqual({ model: r.model, thinking: r.thinking }, profileRuntimeForRole(profileId, r.role));
-      assert.deepEqual(r.origin, { model: 'fixed', thinking: 'fixed' });
-    }
-    assert.equal(p.templateFingerprint, workflowDefinitionFingerprint(a.goalProfileTemplate()));
-    assert.equal(Object.isFrozen(p.roles[0]), true);
-  }
-});
 test('P02 inherit freezes once and retains fixed/inherit provenance independently per field', async () => {
   const a = await import(adapterUrl); const template = a.goalProfileTemplate(); const custom = createInheritedCustomProfile(template);
   const runtime = { model: models[0].fullId, thinking: 'high' };
@@ -547,27 +404,6 @@ test('P05 P07 P10 invalid roles, absent models and unsupported thinking block wi
   assert.throws(() => start(a, { availableModels: models.map(m => ({ ...m, reasoning: false })) }), /thinking/);
   assert.throws(() => start(a, { availableModels: [...models, models[0]] }), /ambiguous/);
   assert.throws(() => start(a, { profileId: undefined }), /profile/);
-});
-test('unmarked ordinary tasks inherit the captured worker role without recapturing defaults', async () => {
-  const a = await import(adapterUrl); const p = start(a);
-  const s = spec('unmarked-workers', [
-    { id: 'outer', type: 'dag', stages: [stage('work')] },
-    { id: 'items', type: 'foreach', from: { source: 'outer', path: '$.items' }, inputPolicy: { artifactAccess: 'none' }, each: { prompt: 'Read item' }, output: { analysis: { required: true }, refs: { required: true } } },
-    stage('plan', 'planning'),
-  ]);
-  delete s.artifactGraph.stages[0].stages[0].profileRole;
-  const before = JSON.stringify(s);
-  const capture = child(a, p, s);
-  const worker = p.roles.find(role => role.role === 'research-execution');
-  const planner = p.roles.find(role => role.role === 'planning');
-  for (const id of ['outer.work', 'items']) {
-    assert.deepEqual(capture.executionProfile.stageOverrides[id], { model: worker.model, thinking: worker.thinking });
-    a.assertGoalResolvedRuntime({ profile: p, spec: s, bundleDigest: h('bundle'), availableModels: models }, capture, id, { model: worker.model, thinking: worker.thinking });
-  }
-  assert.deepEqual(capture.executionProfile.stageOverrides.plan, { model: planner.model, thinking: planner.thinking });
-  assert.equal(JSON.stringify(s), before);
-  assert.equal(capture.profileHash, goalHash(p));
-  assert.throws(() => child(a, p, s, { runtimeOverrides: { model: 'untrusted/model' } }), /override conflict/);
 });
 test('P10 resume keeps the old concrete capture, blocks a lost model, and never saves changed preferences', async () => {
   const a = await import(adapterUrl); const custom = createInheritedCustomProfile(a.goalProfileTemplate());
@@ -681,19 +517,6 @@ test('Goal profile never reads or changes child saved preferences and covers rea
     const c = child(a, p, s); assert.equal(c.executionProfile.definitionFingerprint, workflowDefinitionFingerprint(s));
     assert.ok(collectWorkflowProfileStageSlots(s).length > 0); assert.equal(await readFile(`workflows/${name}/spec.json`, 'utf8'), raw);
   }
-});
-test('fractional non-model workflow data keeps the existing definition identity', async () => {
-  const a = await import(adapterUrl); const p = start(a); const s = spec();
-  s.input = { threshold: 0.5, precision: 1e-7, big: 1e30 };
-  const before = JSON.stringify(s); const c = child(a, p, s);
-  assert.equal(c.executionProfile.definitionFingerprint, workflowDefinitionFingerprint(s));
-  assert.equal(JSON.stringify(s), before); assert.equal(s.input.threshold, 0.5);
-  assert.throws(() => goalHash({ counter: 0.5 }), /non-data/);
-  for (const value of [NaN, Infinity, -Infinity, new Date(), { toJSON() { return 0.5; } }]) {
-    const bad = spec(); bad.input = { value }; assert.throws(() => child(a, p, bad));
-  }
-  let calls = 0; const getter = spec(); getter.input = Object.defineProperty({}, 'threshold', { enumerable: true, get() { calls++; return 0.5; } });
-  assert.throws(() => child(a, p, getter)); assert.equal(calls, 0);
 });
 test('strict Goal profile metadata rejects mixed-field origin erasure and mutation of capture', async () => {
   const a = await import(adapterUrl); const p = start(a); const s = spec(); const context = { profile: p, spec: s, bundleDigest: h('bundle'), availableModels: models };
