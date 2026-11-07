@@ -99,6 +99,21 @@ interactive selector/default/Base behavior is unchanged. Authors add semantic
 [the execution-profile reference](./docs/usage.md#execution-profiles) for the
 exact role matrix, persistence contract, precedence, and batching constraints.
 
+## Usage: work toward a Goal
+
+`/workflow goal` gives Pi an objective and checks, then plans, works, checks and retries until every check passes or a limit is reached. A Goal definition states the objective, its criteria (a sandboxed command such as your test suite, a model rubric, or your own judgment), the paths it may change, and limits on attempts, model requests and cost. You confirm it once before it starts.
+
+```text
+/workflow goal create make parseCsvLine pass test/csv.test.mjs
+/workflow goal run workflows/csv-parser.json "fix the CSV parser"
+/workflow goal status
+/workflow goal pause <runId>      # stop after the current model request
+/workflow goal resume <runId>     # continue in the same Pi session
+/workflow goal recover <runId>    # continue as a new run after a restart
+```
+
+A coding Goal works on a separate copy of your files. If its definition allows it, an achieved Goal copies the verified changes into the allowed paths and writes nothing if those files changed meanwhile. Command criteria need macOS (Seatbelt sandbox). See [usage](docs/usage.md#goal) for the definition format, limits and recovery rules.
+
 ## Usage: choose an execution mode
 
 Use the bundled `execution-router` skill when you want a recommendation about whether a task should be handled directly, by a targeted verifier/subagent, by an existing workflow, or through a separate workflow-authoring request. The skill is advisory: it does not launch, validate, author, or redirect a workflow.
