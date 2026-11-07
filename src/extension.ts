@@ -5114,7 +5114,13 @@ async function handleWorkflowCommand(
 			const runId = requireArg(tokens, 1, "/workflow stop <run-id>");
 			emit(ctx, `Stopping ${runId}…`, "warning");
 			const { run, interruptedTaskIds } = await stopRunOrReportFinishedStop(ctx.cwd, runId);
-			emit(ctx, formatHumanRunStop(run, interruptedTaskIds.length), "warning");
+			// A stopped Goal continues with /workflow goal resume|recover, not /workflow resume.
+			const next = run.goalParticipation && run.tasks.some((task) => task.kind === "goal")
+				? await import("./goal-workflow-commands.js").then(async (commands) =>
+					commands.goalControlMessage("cancel", run,
+						await commands.goalResumeBlocker(ctx.cwd, run).catch(() => null)))
+				: undefined;
+			emit(ctx, formatHumanRunStop(run, interruptedTaskIds.length, next), "warning");
 			return;
 		}
 

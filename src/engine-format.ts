@@ -280,6 +280,8 @@ export function formatHumanRunResume(
 export function formatHumanRunStop(
 	run: WorkflowRunRecord,
 	interruptedCount: number,
+	/** Replaces the generic resume line (a stopped Goal continues differently). */
+	next?: string,
 ): string {
 	return [
 		`Workflow stopped: ${workflowName(run)}`,
@@ -291,7 +293,7 @@ export function formatHumanRunStop(
 		`Progress: ${formatHumanProgress(run)}`,
 		"",
 		`Open: /workflow ${run.runId}`,
-		`Resume: /workflow resume ${run.runId}`,
+		next ?? `Resume: /workflow resume ${run.runId}`,
 	].join("\n");
 }
 
