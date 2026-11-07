@@ -1,6 +1,7 @@
 // Goal private socket directories must stay listenable when TMPDIR is long.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,10 +9,13 @@ import { join } from "node:path";
 
 const { goalSocketTemporaryParent } = await import("../../.tmp/unit/goal-workflow-runtime.js");
 
+// Resolves with whether the endpoint exists at the full path while listening:
+// the Goal channel lstat()s that path right after listen. Node 24 rejects an
+// over-long path; Node 22 binds a shortened path instead, so neither can serve.
 const listen = path => new Promise((resolve, reject) => {
   const server = createServer();
   server.once("error", reject);
-  server.listen(path, () => server.close(() => resolve()));
+  server.listen(path, () => { const present = existsSync(path); server.close(() => resolve(present)); });
 });
 
 test("Goal socket directories fall back to /tmp only when TMPDIR is too long for a Unix socket", async t => {
@@ -35,12 +39,17 @@ test("Goal socket directories fall back to /tmp only when TMPDIR is too long for
     const naive = await mkdtemp(join(tmpdir(), prefix));
     created.push(naive);
     await mkdir(join(naive, "rpc"));
-    await assert.rejects(listen(join(naive, relative)), { code: /^(EINVAL|ENAMETOOLONG)$/ });
+    assert.ok(Buffer.byteLength(join(naive, relative)) > 103, "the previous location is over the socket path limit");
+    const naiveEndpoint = await listen(join(naive, relative)).catch(error => {
+      assert.match(error.code, /^(EINVAL|ENAMETOOLONG)$/);
+      return false;
+    });
+    assert.equal(naiveEndpoint, false, "the previous location cannot hold a Goal endpoint at its full path");
     const parent = goalSocketTemporaryParent(prefix, relative);
     assert.equal(parent, "/tmp");
     const directory = await mkdtemp(join(parent, prefix));
     created.push(directory);
     await mkdir(join(directory, "rpc"));
-    await listen(join(directory, relative));
+    assert.equal(await listen(join(directory, relative)), true, "the fallback endpoint exists at its full path");
   }
 });

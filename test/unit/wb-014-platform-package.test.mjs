@@ -45,7 +45,8 @@ test("C06 package surface: CI validates the complete package surface on macOS an
 		/matrix:\s*\n\s+os:\s*\n\s+- ubuntu-latest\s*\n\s+- macos-latest/,
 	);
 	assert.match(ci, /runs-on: \$\{\{ matrix\.os \}\}/);
-	assert.match(ci, /timeout-minutes: 30/);
+	// The serial Goal runtime file alone takes ~30 min on hosted runners.
+	assert.match(ci, /timeout-minutes: 60/);
 	for (const command of [
 		"npm run validate",
 		"npm run e2e",

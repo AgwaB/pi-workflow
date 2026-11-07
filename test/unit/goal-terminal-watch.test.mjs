@@ -64,4 +64,36 @@ for (const name of ['watchOriginalDurableTerminal', 'watchOriginalTerminalAndFee
       assert.ok(reads >= 3);
     } finally { controller.abort(); emitter.close(); }
   });
+  // Seen on Linux CI: a tamper fixture rewrites run.json in place and the poll
+  // read it half-written ("Unexpected end of JSON input").
+  test(`${name} retries a half-written run record`, async () => {
+    const emitter = new EventEmitter();
+    emitter.close = () => emitter.removeAllListeners();
+    const controller = new AbortController();
+    let reads = 0;
+    const readRunRecord = async () => {
+      if (++reads === 1) return JSON.parse('{"status":');
+      return { status: 'completed' };
+    };
+    const watch = () => emitter;
+    const fn = new Function('readRunRecord', 'watch', 'join', 'cwd', 't', 'testMs',
+      `${body(name)}; return ${name};`)(readRunRecord, watch, join, '/fixture',
+        { signal: controller.signal }, () => 1000);
+    try {
+      const observed = await fn('run', Promise.resolve('completed notice'));
+      assert.equal((observed.run ?? observed).status, 'completed');
+    } finally { controller.abort(); emitter.close(); }
+  });
+  test(`${name} still fails on a read error that is not a partial record`, async () => {
+    const emitter = new EventEmitter();
+    emitter.close = () => emitter.removeAllListeners();
+    const controller = new AbortController();
+    const readRunRecord = async () => { throw Object.assign(new Error('gone'), { code: 'ENOENT' }); };
+    const fn = new Function('readRunRecord', 'watch', 'join', 'cwd', 't', 'testMs',
+      `${body(name)}; return ${name};`)(readRunRecord, () => emitter, join, '/fixture',
+        { signal: controller.signal }, () => 1000);
+    try {
+      await assert.rejects(fn('run', Promise.resolve('completed notice')), /gone/);
+    } finally { controller.abort(); emitter.close(); }
+  });
 }
