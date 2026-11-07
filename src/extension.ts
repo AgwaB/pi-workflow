@@ -726,6 +726,29 @@ export function setWorkflowFeedbackBindWaitMsForTests(value?: number): void {
 			: Math.max(0, Math.floor(value));
 }
 
+/**
+ * A pending stop reply asks the user to retry. If that stop finished in the
+ * background meanwhile, the retry reports the finished stop instead of the
+ * engine's "stop requires a non-terminal run" refusal (which stays for others).
+ */
+async function stopRunOrReportFinishedStop(
+	...args: Parameters<typeof stopRun>
+): ReturnType<typeof stopRun> {
+	try {
+		return await stopRun(...args);
+	} catch (error) {
+		if (!(error instanceof Error) || !error.message.startsWith("stop requires a non-terminal run;"))
+			throw error;
+		const run = await readRunRecord(args[0], args[1]).catch(() => undefined);
+		const interruptedTaskIds = run?.status === "interrupted"
+			? run.tasks.filter((task) => task.status === "interrupted" &&
+				task.statusDetail === "workflow_stopped").map((task) => task.taskId)
+			: [];
+		if (!run || interruptedTaskIds.length === 0) throw error;
+		return { run, interruptedTaskIds };
+	}
+}
+
 async function workflowTerminalToolResult(
 	ctx: ExtensionContext,
 	api: ExtensionAPI,
@@ -4339,7 +4362,7 @@ async function handleWorkflowGoalCommand(
 					: undefined;
 				// After a stop, held requests are refused (never let through, so
 				// nothing starts after the pause); if the stop fails they continue.
-				try { updated = (await stopRun(ctx.cwd, run.runId, host)).run; pausing?.deny(); }
+				try { updated = (await stopRunOrReportFinishedStop(ctx.cwd, run.runId, host)).run; pausing?.deny(); }
 				finally { pausing?.release(); }
 			}
 		} catch (error) {
@@ -5090,7 +5113,7 @@ async function handleWorkflowCommand(
 		if (action === "stop") {
 			const runId = requireArg(tokens, 1, "/workflow stop <run-id>");
 			emit(ctx, `Stopping ${runId}…`, "warning");
-			const { run, interruptedTaskIds } = await stopRun(ctx.cwd, runId);
+			const { run, interruptedTaskIds } = await stopRunOrReportFinishedStop(ctx.cwd, runId);
 			emit(ctx, formatHumanRunStop(run, interruptedTaskIds.length), "warning");
 			return;
 		}

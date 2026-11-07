@@ -11204,6 +11204,13 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.equal(matches(notification), true, "original stop feedback completed before the next command");
       assert.ok(terminalNotifications.includes(notification), "retain the real stop error as evidence");
       stopFeedback = undefined;
+      // A pending stop reply suggests a retry; once the stop has finished, a
+      // repeated cancel reports that stop instead of a non-terminal refusal.
+      const beforeRepeat = await readFile(join(cwd, ".pi", "workflows", run.runId, "run.json"), "utf8");
+      assert.equal(await invoke(`cancel ${run.runId}`), paused, "a repeated cancel reports the finished stop");
+      assert.deepEqual(commandMessages.map(({ level }) => level), ["warning"]);
+      assert.equal(await readFile(join(cwd, ".pi", "workflows", run.runId, "run.json"), "utf8"), beforeRepeat,
+        "reporting a finished stop changes nothing");
     } else run = (await stopRun(cwd, run.runId)).run;
     assert.equal(run.status, "interrupted");
     const stoppedWorker = run.tasks.find(task => task.taskId === originalWorker.taskId);
