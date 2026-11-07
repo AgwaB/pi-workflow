@@ -313,12 +313,20 @@ export async function openGoalAuthenticatedLocalChannel(input: {
 }
 async function timed<T>(run: () => Promise<T>, stopped: AbortSignal): Promise<T> {
   stopped.throwIfAborted();
-  return await new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Goal authenticated exchange timed out")), GOAL_AUTHENTICATED_ACTIVE_TIMEOUT);
-    const abort = () => reject(stopped.reason instanceof Error ? stopped.reason : new Error("Goal exchange aborted"));
-    stopped.addEventListener("abort", abort, { once: true });
-    run().then(resolve, reject).finally(() => { clearTimeout(timer); stopped.removeEventListener("abort", abort); });
-  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("Goal authenticated exchange timed out")), GOAL_AUTHENTICATED_ACTIVE_TIMEOUT);
+      abort = () => reject(stopped.reason instanceof Error ? stopped.reason : new Error("Goal exchange aborted"));
+      stopped.addEventListener("abort", abort, { once: true });
+      // The caller retains ownership of run(); timeout ends only observation.
+      run().then(resolve, reject);
+    });
+  } finally {
+    clearTimeout(timer);
+    if (abort) stopped.removeEventListener("abort", abort);
+  }
 }
 async function active(frames: Frames, stopped: AbortSignal): Promise<Buffer> {
   stopped.throwIfAborted();
