@@ -1994,7 +1994,7 @@ for (const closureMode of process.env.PIWF_TEST_ORDINARY_CLOSURE_RECEIPT ? [] : 
 test(`NONAUTHORITY offline ordinary Goal cold producer exact-root prune acceptance${closureMode === "delete" ? "" : ` ${closureMode}`}`, async () => {
   const owned = await mkdtemp(join(tmpdir(), "goal-cold-closure-parent-"));
   const receiptPath = join(owned, "producer.json");
-  let cwd;
+  let cwd, failed = false;
   try {
     const replan = closureMode.startsWith("replan-");
     const generationCount = closureMode === "replan-three-criteria" ? 3 : replan ? 2 : 1;
@@ -2240,9 +2240,16 @@ test(`NONAUTHORITY offline ordinary Goal cold producer exact-root prune acceptan
     assert.equal(deleted.runs[0].deleted, true); assert.equal(existsSync(runDir), false);
     assert.equal(existsSync(mirrorDir), false);
     assert.equal(await readFile(join(unrelatedDir, "run.json"), "utf8"), unrelatedBytes);
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    if (cwd) await rm(cwd, { recursive: true, force: true });
-    await rm(owned, { recursive: true, force: true });
+    // The producer retains its own failure evidence below owned; keep it.
+    if (failed) console.error(`TEST_ONLY failed cold closure evidence retained at ${owned}`);
+    else {
+      if (cwd) await rm(cwd, { recursive: true, force: true });
+      await rm(owned, { recursive: true, force: true });
+    }
   }
 });
 test("ordinary run writes preserve published Goal profile evidence across final rename", async t => {
@@ -5294,7 +5301,13 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       return { runId, attemptId, status: "running" };
     },
     waitForDurableLaunchBarrierV2Ack(descriptor, release) {
-      const callback = {};
+      const callback = { phase: "entered", phaseSince: Date.now(), phases: [] };
+      const markPhase = phase => {
+        callback.phase = phase;
+        callback.phaseSince = Date.now();
+        callback.phases.push({ phase, at: callback.phaseSince });
+        if (callback.phases.length > 12) callback.phases.shift();
+      };
       const entry = attempts.get(release.runId);
       assert.ok(entry, "the ACK callback retains its original native attempt");
       const separateLaunchAcceptance = entry.backendLateLaunchAcceptance === true;
@@ -5827,7 +5840,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
                     const abort = () => verifierFirstSdkRelease.reject(t.signal.reason);
                     t.signal.addEventListener("abort", abort, { once: true });
                     try {
+                      markPhase("profile-fixture-release-wait");
                       await verifierFirstSdkRelease.promise;
+                      markPhase("profile-fixture-released");
                     } finally {
                       t.signal.removeEventListener("abort", abort);
                     }
@@ -6478,7 +6493,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
               }
             } });
             try {
+              markPhase("agent-prompt");
               await agent.prompt(options.task);
+              markPhase("agent-result");
               if (sourceBackedVerifier) {
                 const agentToolResults =
                   agent.state.messages.filter(message => message.role === "toolResult");
@@ -6529,7 +6546,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
               else delete usage.reasoning;
               return { ...finalMessage, usage };
             } finally {
+              markPhase("verifier-lifecycle-shutdown");
               await shutdownNativeVerifier();
+              markPhase("verifier-lifecycle-settled");
             }
           };
           {
@@ -6749,7 +6768,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
           // Retire only this callback's accounting hook, never an outer stop/evidence hook.
           if (accountingUnknown && requestBudget === "accounting-ack") setRunLeaseTestHooksForTests();
           if (sourceBackedVerifier) {
+            markPhase("request-accounting-shutdown");
             await native.runner.emit({ type: "session_shutdown", reason: "shutdown" });
+            markPhase("request-accounting-settled");
             nativeVerifierFixture.requestShutdown = true;
           }
           if (verifierProfileException && canonical.id === verifierFirstSdkEntry?.specId) {
@@ -7595,7 +7616,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         throw error;
       }
       })();
-      callback.settled = work.then(() => { callback.acknowledged = true; }, error => {
+      callback.settled = work.then(() => { markPhase("completed"); callback.acknowledged = true; }, error => {
+        callback.failedPhase = callback.phase;
+        markPhase("failed");
         callback.error = error;
         if (rubric && error !== callback.expectedNativeFailure) rubricFixtureFailure.reject(error);
         candidatePolicyRejection?.resolve(callback);
@@ -9101,9 +9124,14 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       stage = name;
       return await Promise.race([promise, cancelled]);
     };
-    const drainStoppedFeedback = async () => {
+    const drainStoppedFeedback = async (allowedPendingReply) => {
       await joinPipeline("original-stop-feedback-observer-drain", stopWorkflowFeedbackAndDrainForTests(cwd, run.runId));
+      let pendingNotices = 0;
       for (const notice of commandMessages.filter(({ level }) => level === "error")) {
+        if (allowedPendingReply !== undefined && notice.message === allowedPendingReply) {
+          pendingNotices++;
+          continue;
+        }
         assert.ok(notice.message.startsWith(`Workflow ${run.runId} interrupted (`) &&
           notice.message.includes("Workflow stopped by user request"),
         `unexpected original stop error before resume: ${JSON.stringify({ runId: run.runId,
@@ -9113,6 +9141,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
             status: task.status, lastMessage: task.lastMessage })) } })}`);
         assert.ok(terminalNotifications.includes(notice));
       }
+      assert.equal(pendingNotices, allowedPendingReply === undefined ? 0 : 1,
+        "exactly one bounded pending stop reply when it was the command result");
       stopFeedback = undefined;
     };
     let observer;
@@ -9161,7 +9191,18 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         await joinPipeline("original-reader-cancellation-publication", published);
         stopReply = await joinPipeline("pending-root-pause", stopping);
         setRunLeaseTestHooksForTests();
-        if (stopReply !== registeredTerminalMessage("cancel", "interrupted")) {
+        // Under load the bounded 1500 ms stop confirmation can elapse first; the
+        // product keeps the durable stop intent and replies pending. As in the
+        // mixed and foreach stop cases, that reply is not cancellation proof: the
+        // original root must still reach interrupted before the checks below.
+        const pendingReply = `Workflow stop requested for ${run.runId}, but active work or descendant workflow stop could not be confirmed within 1500ms; stop intent remains durable and cancellation is still pending. Retry /workflow stop ${run.runId}`;
+        const stopPending = stopReply === pendingReply;
+        if (stopPending) {
+          t.diagnostic(`bounded stop reply was pending for ${run.runId}; joining the original interrupted state`);
+          const terminal = await joinPipeline("pending-root-terminal-publication",
+            watchOriginalDurableTerminal(run.runId));
+          assert.equal(terminal.status, "interrupted", "bounded pending reply is not terminal cancellation proof");
+        } else if (stopReply !== registeredTerminalMessage("cancel", "interrupted")) {
           const failed = await readRunRecord(cwd, childId);
           console.error("pending warm original cleanup failure", JSON.stringify({ reply: stopReply,
             status: failed.status, stopIntent: await readWorkflowStopIntent(cwd, childId),
@@ -9171,8 +9212,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
               grants: task.launchAuthority?.records, barriers: task.durableLaunchBarrier?.records })),
           }).slice(0, 8192));
         }
-        assert.equal(stopReply, registeredTerminalMessage("cancel", "interrupted"));
-        await drainStoppedFeedback();
+        if (!stopPending) assert.equal(stopReply, registeredTerminalMessage("cancel", "interrupted"));
+        await drainStoppedFeedback(stopPending ? pendingReply : undefined);
         await joinPipeline("pending-stop-watcher-settlement", stopWorkflowWatchersForTests([cwd]));
         run = await readRunRecord(cwd, run.runId);
         const stopped = await readRunRecord(cwd, childId);
@@ -11167,10 +11208,19 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     assert.equal(run.status, "interrupted");
     const stoppedWorker = run.tasks.find(task => task.taskId === originalWorker.taskId);
     assert.equal(stoppedWorker.durableLaunchBarrier.records.at(-1).phase, "cancellation_acknowledged");
-    // Stop refuses old callbacks at once (the endpoint drops new connections);
-    // the endpoint file is removed when its drain finishes, which can lag the
-    // returned stop under load.
-    await assert.rejects(oldRead({ path: "a.txt" }), "root stop at once refuses old callbacks");
+    // Right after stop, an old callback is either refused at the endpoint or,
+    // if retirement polling has not run yet, denied by the per-request original
+    // checks with no source bytes. The endpoint is removed when its drain
+    // finishes, which can lag the returned stop under load; full retirement is
+    // required below.
+    const immediate = await oldRead({ path: "a.txt" }).then(value => ({ value }), () => undefined);
+    if (immediate) {
+      const shown = `resolved ${JSON.stringify(immediate.value)?.slice(0, 2048)}`;
+      assert.deepEqual(Object.keys(immediate.value ?? {}).sort(), ["denial", "message", "status"],
+        `root stop refuses old callbacks without source bytes; ${shown}`);
+      assert.equal(immediate.value.status, "blocked", shown);
+      assert.equal(immediate.value.denial, true, shown);
+    }
     await waitForOriginalEndpointRetirement(oldRead, AbortSignal.any([t.signal, AbortSignal.timeout(testMs(10_000))]));
     await assertOriginalCandidateRetired(oldRead, [{ path: "a.txt" }], "root stop permanently invalidates old callbacks");
     // Join the original interrupted writer after genuine stop feedback, not a
@@ -11412,26 +11462,39 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     const deadline = Date.now() + testMs(20_000);
     let watcher;
     let timer;
+    let poll;
     let inspecting = false;
+    let inspectAgain = false;
+    let settled = false;
     const finish = (error, observed) => {
+      if (settled) return;
+      settled = true;
       watcher?.close();
       clearTimeout(timer);
+      clearInterval(poll);
       t.signal.removeEventListener("abort", abort);
       if (error) rejectRun(error); else resolveRun(observed);
     };
     const abort = () => finish(t.signal.reason ?? new Error("original durable terminal watch aborted"));
     const inspect = async () => {
-      if (inspecting) return;
+      if (settled) return;
+      if (inspecting) { inspectAgain = true; return; }
       inspecting = true;
       try {
-        const observed = await readRunRecord(cwd, originalRunId);
-        if (["completed", "failed", "interrupted", "blocked"].includes(observed.status))
-          finish(undefined, observed);
+        do {
+          inspectAgain = false;
+          const observed = await readRunRecord(cwd, originalRunId);
+          if (["completed", "failed", "interrupted", "blocked"].includes(observed.status))
+            finish(undefined, observed);
+        } while (inspectAgain && !settled);
       } catch (error) { finish(error); }
       finally { inspecting = false; }
     };
     watcher = watch(join(cwd, ".pi", "workflows", originalRunId), () => { void inspect(); });
     watcher.once("error", error => finish(error));
+    // Directory events can be lost (a completed run.json went unobserved for
+    // 18 s); a coalesced periodic re-read keeps the same deadline and contract.
+    poll = setInterval(() => { void inspect(); }, 100);
     t.signal.addEventListener("abort", abort, { once: true });
     timer = setTimeout(() => finish(new Error(`original durable run did not terminate within ${testMs(20_000)}ms: ${originalRunId}`)),
       Math.max(0, deadline - Date.now()));
@@ -11444,7 +11507,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       const deadline = executionWithinOuterDeadline ? undefined : Date.now() + testMs(20_000);
       let watcher;
       let timer;
+      let poll;
       let inspecting = false;
+      let inspectAgain = false;
       let settled = false;
       let observedRun;
       let notice;
@@ -11453,6 +11518,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         settled = true;
         watcher?.close();
         clearTimeout(timer);
+        clearInterval(poll);
         t.signal.removeEventListener("abort", abort);
         if (error) rejectObservation(error);
         else resolveObservation({ run: observedRun, notice });
@@ -11465,20 +11531,27 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         Math.max(0, (deadline ?? Date.now() + testMs(20_000)) - Date.now()));
       };
       const inspect = async () => {
-        if (inspecting || observedRun) return;
+        if (settled || observedRun) return;
+        if (inspecting) { inspectAgain = true; return; }
         inspecting = true;
         try {
-          const current = await readRunRecord(cwd, originalRunId);
-          if (["completed", "failed", "interrupted", "blocked"].includes(current.status)) {
-            observedRun = current;
-            if (executionWithinOuterDeadline) armNoticeDeadline();
-          }
-          if (observedRun && notice) finish();
+          do {
+            inspectAgain = false;
+            const current = await readRunRecord(cwd, originalRunId);
+            if (settled) return;
+            if (["completed", "failed", "interrupted", "blocked"].includes(current.status)) {
+              observedRun = current;
+              if (executionWithinOuterDeadline) armNoticeDeadline();
+            }
+            if (observedRun && notice) finish();
+          } while (inspectAgain && !observedRun && !settled);
         } catch (error) { finish(error); }
         finally { inspecting = false; }
       };
       watcher = watch(join(cwd, ".pi", "workflows", originalRunId), () => { void inspect(); });
       watcher.once("error", error => finish(error));
+      // Same lost-event fallback as watchOriginalDurableTerminal.
+      poll = setInterval(() => { void inspect(); }, 100);
       t.signal.addEventListener("abort", abort, { once: true });
       if (!executionWithinOuterDeadline) armNoticeDeadline();
       feedback.then(value => {
@@ -11656,7 +11729,12 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
           detail: task.statusDetail, message: task.lastMessage?.slice(0, 256), backendRunId: task.backendTaskId,
           barrier: task.durableLaunchBarrier?.records.at(-1)?.phase, authority: task.launchAuthority?.records.at(-1)?.state.phase })),
         native: [...attempts].slice(-6).map(([runId, attempt]) => ({ runId, attemptId: attempt.attemptId,
-          thinking: attempt.options.thinking, status: snapshots.get(runId)?.status })) }));
+          thinking: attempt.options.thinking, status: snapshots.get(runId)?.status,
+          callbackPhase: nativeCallbacks.get(runId)?.phase,
+          phaseAgeMs: nativeCallbacks.get(runId)?.phaseSince === undefined ? undefined :
+            Date.now() - nativeCallbacks.get(runId).phaseSince,
+          failedPhase: nativeCallbacks.get(runId)?.failedPhase,
+          phaseHistory: nativeCallbacks.get(runId)?.phases })) }));
       throw error;
     } finally {
       stopFeedback = undefined;
@@ -19417,7 +19495,7 @@ test("normal engine Goal consumes real support artifacts after consent and cance
       },
     });
     let connected;
-    let observer;
+    let observer, observerPoll;
     try {
       connected = await runWorkflowSpec(join(cwd, "goal.json"), cwd, { goalPolicyHost: host, executionProfile: "captured" });
       if (boundary === "stop-replanner") {
@@ -19452,16 +19530,24 @@ test("normal engine Goal consumes real support artifacts after consent and cance
       } else {
         const terminal = Promise.withResolvers();
         let checking = Promise.resolve();
+        let queued = false;
         const inspect = () => {
+          if (queued) return; // one queued re-read already covers this event
+          queued = true;
           checking = checking.then(async () => {
+            queued = false;
             const record = await readRunRecord(cwd, connected.runId);
             if (!record.tasks.some(task => ["pending", "running"].includes(task.status))) terminal.resolve(record);
           }).catch(terminal.reject);
         };
         observer = watch(join(cwd, ".pi", "workflows", connected.runId), inspect);
+        // Directory events can be lost (an all-terminal run.json went unobserved
+        // for 20 s); a coalesced periodic re-read keeps the same bounded join.
+        observerPoll = setInterval(inspect, 100);
         inspect();
         connected = await boundedJoin(terminal.promise);
         observer.close(); observer = undefined;
+        clearInterval(observerPoll); observerPoll = undefined;
         await checking;
         await stopWorkflowWatchersForTests([cwd]);
         assert.equal(launches.length, ["missing-control", "repaired-control"].includes(boundary) ? 3 : 2,
@@ -19520,6 +19606,7 @@ test("normal engine Goal consumes real support artifacts after consent and cance
         `${process.env.PI_WORKFLOW_E2E_PROCESS_LOG}.${boundary}.json`, JSON.stringify({ launches: launches.length, interruptions, connected }, null, 2));
     } finally {
       observer?.close();
+      clearInterval(observerPoll);
       try { if (connected && (await readRunRecord(cwd, connected.runId)).status === "running") await stopRun(cwd, connected.runId); }
       finally { await stopWorkflowWatchersForTests([cwd]); setRunLeaseTestHooksForTests(); setSubagentApiForTests(undefined); }
     }
