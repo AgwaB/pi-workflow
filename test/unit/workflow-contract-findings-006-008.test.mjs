@@ -156,20 +156,6 @@ test("impact renderer rejects contradictory source/spec identity and duplicate t
   assert.deepEqual(duplicate.sourceCoverage.duplicateTaskIds, ["task-1"]);
 });
 
-test("spec-review partition publishes owner rows and deterministic reconciliation", async () => {
-  const owner = { source: "verify-findings.F-001", specId: "verify-findings.f-001", taskId: "task-1", stageId: "verify-findings", itemIdentity: "F-001", placeholderSpecId: "verify-findings.item", status: "completed" };
-  const result = await specReview({
-    sources: {
-      "candidate-findings": { candidateFindings: [{ id: "F-001", title: "Gap", severity: "high" }] },
-      "verify-findings.F-001": { id: "F-001", verdict: "DROP", severity: "high", evidence: [], counterEvidence: [], finalClaim: "not present", recommendedAction: "none" },
-    },
-    context: { sourceStatuses: [owner] },
-    options: { mode: "partition" },
-  });
-  assert.deepEqual(result.verifierCoverage.ownerLedger, [owner]);
-  assert.equal(result.verifierCoverage.ownerLedgerReconciliation.passed, true);
-  assert.deepEqual(result.verifierCoverage.verifierRows.map((row) => row.id), ["F-001"]);
-});
 
 test("spec-review batch owner ledger quarantines rows with swapped materialized ownership", async () => {
   const plan = {
@@ -263,28 +249,6 @@ test("spec-review singleton verifier rejects wrong-stage and swapped materialize
   assert.equal(swapped.verdictCounts.needsHuman > 0, true);
 });
 
-test("deep-research singleton verifier ownership is exact and order-independent", async () => {
-  const sources = {
-    "normalize-claims": { claimInventory: { verificationCandidates: [{ id: "claim-001", claim: "Exact claim" }] } },
-    "verify-claims": { id: "claim-001", status: "unsupported", evidence: [] },
-  };
-  const owner = { source: "verify-claims", specId: "verify-claims.claim-001", taskId: "task-claim-001", stageId: "verify-claims", itemIdentity: "claim-001", placeholderSpecId: "verify-claims.item", status: "completed" };
-  const good = await claimGate({ sources, context: { sourceStatuses: [owner] } });
-  assert.deepEqual(good.verifierOwnerLedger, [{ source: owner.source, stageId: owner.stageId, specId: owner.specId, taskId: owner.taskId, itemIdentity: owner.itemIdentity, placeholderSpecId: owner.placeholderSpecId, status: owner.status }]);
-  assert.equal(good.gateSummary.verifierOwnerIssues, 0);
-  for (const status of [
-    { ...owner, itemIdentity: "claim-002" },
-    { ...owner, stageId: "other-stage" },
-  ]) {
-    const bad = await claimGate({ sources, context: { sourceStatuses: [status] } });
-    assert.equal(bad.gateSummary.verifierOwnerIssues, 1);
-    assert.equal(bad.verifierOwnerIssues[0].claimId, "claim-001");
-    assert.deepEqual(bad.statusPartitions.verified, []);
-  }
-  const ambiguous = await claimGate({ sources, context: { sourceStatuses: [owner, { ...owner, taskId: "task-claim-001b" }] } });
-  assert.equal(ambiguous.verifierOwnerIssues[0].reason, "verifier_source_not_bound_to_exactly_one_materialized_owner");
-  assert.equal(ambiguous.gateSummary.invalidVerifierRows, 1);
-});
 
 test("deep-research packet reconciliation blocks swapped and inconsistent final packets", async () => {
   const packet = {

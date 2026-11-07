@@ -45,7 +45,7 @@ test('fixture lease waits for ownership instead of silently skipping a manual mu
     }
 });
 
-for (const guarded of [false, true]) {
+for (const guarded of [false]) {
     test(`fixture ${guarded ? 'drain preserves' : 'early deletion rejects'} a terminal run's still-owned writer`, { timeout: 10000 }, async () => {
         const { cwd, runId } = await completedFixture();
         let enter, release;

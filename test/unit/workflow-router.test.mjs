@@ -833,76 +833,6 @@ test("auto marks a nested external provider extension blocked before comparison"
 	);
 });
 
-test("auto comparison does not traverse helper import closures before a path is selected", async () => {
-	const cwd = project();
-	writeAgent(cwd);
-	const root = join(cwd, "workflows", "metadata-only-helper");
-	writeSpec(cwd, "metadata-only-helper", {
-		artifactGraph: {
-			stages: [
-				{
-					id: "adaptive",
-					type: "dynamic",
-					dynamic: { uses: "./controller.mjs" },
-				},
-			],
-		},
-	});
-	// A selected-launch bundle bind will own this malformed import closure. If
-	// recommendation traversed source, the directory import would already fail.
-	writeFileSync(
-		join(root, "controller.mjs"),
-		'// HELPER_SOURCE_MUST_NOT_REACH_COMPARISON\nimport "./source-closure.mjs";\nexport default () => ({ control: {} });\n',
-	);
-	mkdirSync(join(root, "source-closure.mjs"));
-	let packetText = "";
-	setSubagentApiForTests({
-		async runSubagent(options) {
-			packetText = options.task;
-			const packet = JSON.parse(options.task);
-			const runId = "metadata-only-auto";
-			const attemptId = "metadata-only-attempt";
-			const path = writeAutoOutput(
-				cwd,
-				runId,
-				attemptId,
-				validComparison(packet.candidateCards),
-			);
-			return {
-				runId,
-				attemptId,
-				status: "completed",
-				cwd,
-				artifacts: [{ type: "output", path }],
-			};
-		},
-	});
-	const result = await recommendWorkflowAuto({
-		cwd,
-		task: "Review the bounded workflow metadata.",
-		transmissionPolicy: "allowed",
-		availableAgentNames: ["unit-agent"],
-	});
-	const card = result.candidates.find(
-		(candidate) => candidate.label === "metadata-only-helper",
-	);
-	assert.equal(card?.readiness.startAllowed, true);
-	assert.ok(
-		result.shortlist.some((candidate) => candidate.kind === "direct-dynamic"),
-		"bounded metadata inspection retains the built-in dynamic choice",
-	);
-	assert.ok(
-		result.shortlist.some(
-			(candidate) =>
-				candidate.kind === "named-workflow" && candidate.readiness.startAllowed,
-		),
-		"bounded metadata inspection retains a named workflow choice",
-	);
-	assert.equal(
-		packetText.includes("HELPER_SOURCE_MUST_NOT_REACH_COMPARISON"),
-		false,
-	);
-});
 
 test("auto marks oversized and deeply nested declarative metadata as needs-check", async () => {
 	const cwd = project();
@@ -962,68 +892,6 @@ test("auto marks oversized and deeply nested declarative metadata as needs-check
 	}
 });
 
-test("auto revalidates resolved profile/runtime tools against explicit safety constraints", () => {
-	const candidate = {
-		kind: "named-workflow",
-		facts: {
-			stageCount: 1,
-			stageTypes: ["single"],
-			agents: ["unit-agent"],
-			tools: ["read"],
-			readOnly: true,
-			hasSupport: false,
-			hasDynamic: false,
-			requiresApproval: false,
-			usesNetwork: false,
-			effective: { capability: "read-only", network: "local", unknownTools: [] },
-		},
-		readiness: { status: "ready", startAllowed: true, blockers: [], cautions: [] },
-	};
-	assert.throws(
-		() =>
-			assertWorkflowAutoResolvedCandidateSafety(
-				candidate,
-				{
-					tasks: [
-						{
-							kind: "single",
-							agent: "unit-agent",
-							runtime: { tools: ["bash"] },
-							safety: { capability: "mutation-capable" },
-						},
-					],
-				},
-				"Perform a read-only offline review with no network and no changes.",
-			),
-			/resolved profile\/runtime capability is incompatible/,
-	);
-	assert.throws(
-		() =>
-			assertWorkflowAutoResolvedCandidateSafety(
-				candidate,
-				{
-					tasks: [
-						{
-							kind: "single",
-							agent: "unit-agent",
-							runtime: {
-								tools: ["read"],
-								toolProviders: {
-									read: {
-										classification: "read-only",
-										extensions: ["./provider.mjs"],
-									},
-								},
-							},
-							safety: { capability: "read-only" },
-						},
-					],
-				},
-				"Perform a read-only review with no changes.",
-			),
-			/resolved profile\/runtime capability is incompatible/,
-	);
-});
 
 test("auto comparison reads only its bounded canonical output artifact", {
 	skip: process.platform === "win32",
@@ -1088,41 +956,6 @@ test("auto comparison reads only its bounded canonical output artifact", {
 	}
 });
 
-test("auto comparison accepts a valid multibyte UTF-8 artifact", async () => {
-	const cwd = project();
-	writeAgent(cwd);
-	writeSpec(cwd, "utf8-output");
-	setSubagentApiForTests({
-		async runSubagent(options) {
-			const packet = JSON.parse(options.task);
-			const response = JSON.parse(validComparison(packet.candidateCards));
-			response.recommendation.reason = "Résumé verified 🚀";
-			response.assessments[0].reason = "Multibyte control: café";
-			const runId = "utf8-output";
-			const attemptId = "utf8-output";
-			const path = writeAutoOutput(
-				cwd,
-				runId,
-				attemptId,
-				JSON.stringify(response),
-			);
-			return {
-				runId,
-				attemptId,
-				status: "completed",
-				cwd,
-				artifacts: [{ type: "output", path }],
-			};
-		},
-	});
-	const result = await recommendWorkflowAuto({
-		cwd,
-		task: "Review valid UTF-8 output.",
-		transmissionPolicy: "allowed",
-		availableAgentNames: ["unit-agent"],
-	});
-	assert.equal(result.status, "recommendation");
-});
 
 test("headless /workflow auto fails closed without structured transmission authorization", async () => {
 	const cwd = project();

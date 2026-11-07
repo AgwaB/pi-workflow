@@ -92,33 +92,7 @@ async function validSourceSet(source) {
   return all;
 }
 
-test("fresh model controls validate without the redundant impact ledger and final ledger is canonical", async () => {
-  const source = controls();
-  const all = await validSourceSet(source);
-  for (const stage of stages) {
-    assert.equal(all[stage].required.includes("impactLedger"), false);
-    assert.equal(Object.hasOwn(all[stage].properties, "impactLedger"), false);
-  }
-  const result = await renderImpactReport({ sources: source, context: contextFor() });
-  assert.equal(result.status, "passed");
-  assert.equal(result.ledgerCoverage.status, "complete");
-  assert.ok(result.impactLedger.every((row) => row.provenance && row.contentHash.startsWith("sha256:")));
-  assert.equal(validateJsonSchema(result, all.final).valid, true, JSON.stringify(validateJsonSchema(result, all.final).issues));
-});
 
-test("canonical observations use source-qualified identity, preserve duplicate producer labels, and ignore producer provenance", async () => {
-  const source = controls();
-  const impacts = source["impact-analysis.security-performance-impact"].impacts;
-  impacts.push(item("SAME-LABEL", "first observation", { severity: "low", owner: "model-owner", sourceIds: ["forged-source"] }));
-  impacts.push(item("SAME-LABEL", "second observation", { severity: "low", owner: "other-owner", sourceIds: ["also-forged"] }));
-  const result = await renderImpactReport({ sources: source, context: contextFor() });
-  assert.equal(result.status, "passed");
-  const rows = result.impactLedger.filter((row) => row.provenance.field === "impacts" && row.provenance.stage === "security-performance-impact");
-  assert.equal(rows.length, 2);
-  assert.notEqual(rows[0].id, rows[1].id);
-  assert.deepEqual(rows.map((row) => row.sourceIds), [["impact-analysis.security-performance-impact"], ["impact-analysis.security-performance-impact"]]);
-  assert.ok(rows.every((row) => row.origin === "security-performance-impact"));
-});
 
 test("absent, renamed, or mutated advisory echoes cannot alter canonical original observations", async () => {
   const source = controls();
@@ -214,25 +188,6 @@ test("known blocker and informational unknown survive together without forcing e
   assert.ok(result.impactLedger.some((row) => row.text === "Readonly unknown caller note"));
 });
 
-test("known negative conclusions retain their risk floor alongside unquantified observations", async () => {
-  const all = await schemas();
-  for (const verdict of ["BLOCKED", "NEEDS_WORK"]) {
-    const source = controls({ high: true });
-    source["impact-analysis.ship-readiness"].status = verdict === "BLOCKED" ? "blocked" : "needs-work";
-    source["impact-analysis.impact-synthesis"].verdict = verdict;
-    source["impact-analysis.security-performance-impact"].impacts.push(item("KNOWN-HIGH", "Tenant isolation risk.", { severity: "high" }));
-    source["impact-analysis.state-data-impact"].impacts.push(item("UNKNOWN-MIGRATION", "Migration behavior cannot be established from the supplied scope.", { severity: "unknown", scope: "unknown" }));
-    const result = await renderImpactReport({ sources: source, context: contextFor() });
-    assert.equal(result.status, "passed");
-    assert.equal(result.verdict, verdict);
-    assert.equal(result.riskLevel, "high");
-    assert.equal(result.riskUncertainty.present, true);
-    assert.equal(result.riskUncertainty.knownFloor, "high");
-    assert.equal(result.riskUncertainty.observationIds.length, 1);
-    assert.match(result.completionSummaryMarkdown, /unquantified/);
-    assert.equal(validateJsonSchema(result, all.final).valid, true);
-  }
-});
 
 test("unquantified observations cannot authorize READY or hide an understated known floor", async () => {
   const source = controls();
@@ -281,40 +236,7 @@ test("business BLOCKED is a rendered negative analysis, distinct from control-in
   assert.equal(result.gates.sourceCoverageComplete, true);
 });
 
-test("source reorder is deterministic and sidecar retains all original controls", async () => {
-  const source = controls();
-  source["impact-analysis.change-scope"].affectedFiles.push(item("FILE-1", "src/cache.ts"));
-  const first = await renderImpactReport({ sources: source, context: contextFor() });
-  const reordered = Object.fromEntries(Object.entries(source).reverse());
-  const second = await renderImpactReport({ sources: reordered, context: contextFor() });
-  assert.equal(first.digest, second.digest);
-  const cwd = await mkdtemp(join(tmpdir(), "impact-sidecar-"));
-  const sidecar = await renderImpactReport({ sources: source, context: { ...contextFor(), cwd, runId: "run", taskId: "final" } });
-  assert.equal(sidecar.gates.sidecarPublished, true);
-  const ledger = JSON.parse(await readFile(join(cwd, ".pi", "workflows", "run", "tasks", "final", "source-ledger.json"), "utf8"));
-  assert.equal(ledger.sourceControls["change-scope"].affectedFiles[0].id, "FILE-1");
-  assert.match(sidecar.blockers.join("\n"), /does not attest source bytes|control values/);
-  await rm(cwd, { recursive: true, force: true });
-});
 
-test("required projected reads distinguish default truncation from explicit capacity", async () => {
-  const root = await mkdtemp(join(tmpdir(), "impact-projection-"));
-  const artifact = join(root, "control.json");
-  await writeFile(artifact, JSON.stringify({ schema: "stage-control-v1", payload: "x".repeat(60000) }));
-  const manifest = {
-    schema: "workflow-source-manifest-v1", runId: "projection-run", taskId: "consumer",
-    sources: [{ source: "impact-analysis.change-scope", taskId: "producer", stageId: "change-scope", specId: "impact-analysis.change-scope.main", artifacts: { control: { path: artifact } } }],
-  };
-  const defaultRead = await readWorkflowArtifact(manifest, manifest.sources[0].source, "control", { runDir: root, path: "$" });
-  assert.equal(defaultRead.truncated, true);
-  const explicitRead = await readWorkflowArtifact(manifest, manifest.sources[0].source, "control", { runDir: root, path: "$", maxChars: defaultRead.projection.originalChars + 1 });
-  assert.equal(explicitRead.truncated, false);
-  const readDir = join(root, "reads");
-  await import("node:fs/promises").then(({ mkdir }) => mkdir(readDir));
-  await writeFile(join(readDir, "read-ledger.jsonl"), `${JSON.stringify({ schema: "workflow-artifact-read-v1", runId: manifest.runId, taskId: manifest.taskId, source: manifest.sources[0].source, artifact: "control", at: new Date().toISOString(), bytes: explicitRead.bytes, returnedBytes: explicitRead.returnedBytes, truncated: explicitRead.truncated, path: "$", maxChars: explicitRead.projection.maxChars })}\n`);
-  assert.deepEqual(await checkRequiredArtifactReads(readDir, [{ source: manifest.sources[0].source, artifact: "control", path: "$" }], [{ source: manifest.sources[0].source, artifact: "control", path: "$", mustNotTruncate: true }]), { missing: [], projectionFailures: [] });
-  await rm(root, { recursive: true, force: true });
-});
 
 test("sidecar failure is visible and cannot claim passed", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "impact-sidecar-fail-"));

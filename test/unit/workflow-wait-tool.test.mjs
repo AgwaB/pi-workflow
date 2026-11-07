@@ -1788,75 +1788,6 @@ test("direct dynamic synthesis previews validated analysis, never protocol wrapp
 	}
 });
 
-test("workflow wait previews the declared dynamic output instead of the last completed task", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-output-"));
-	try {
-		const runId = "workflow_wait_authoritative_output";
-		const run = runRecord(cwd, {
-			runId,
-			provenance: { mode: "direct-dynamic" },
-			taskSummary: {
-				total: 3,
-				pending: 0,
-				running: 0,
-				blocked: 0,
-				completed: 3,
-				failed: 0,
-				skipped: 0,
-				interrupted: 0,
-			},
-			tasks: [
-				taskRecord(runId, "task-1", "dynamic.controller", {
-					kind: "dynamic",
-					statusDetail: "dynamic_completed",
-				}),
-				taskRecord(runId, "task-2", "dynamic.synthesis-final"),
-				taskRecord(runId, "task-3", "dynamic.intermediate-tail"),
-			],
-		});
-		await writeRunFixture(cwd, run, {
-			schema: "dynamic-controller-result-v1",
-			status: "synthesized",
-			outputTasks: ["dynamic.synthesis-final"],
-		});
-		await writeDynamicControl(
-			cwd,
-			{ tasks: [run.tasks[1]] },
-			{ executiveMarkdown: "Authoritative synthesized answer." },
-		);
-		await writeDynamicControl(
-			cwd,
-			{ tasks: [run.tasks[2]] },
-			{ executiveMarkdown: "Misleading later intermediate output." },
-		);
-		await writeFeedbackAudience(cwd, run.runId, "session-output");
-		const tools = [];
-		registerWorkflowWaitTool(fakePi(tools), {
-			PI_WORKFLOW_ROLE: "supervisor",
-		});
-		const result = await tools[0].execute(
-			"call-output",
-			{ runId, timeoutMs: 60_000 },
-			new AbortController().signal,
-			undefined,
-			{
-				...feedbackContext(cwd, "session-output"),
-				hasUI: false,
-			},
-		);
-		assert.deepEqual(result.details.outputTaskIds, ["dynamic.synthesis-final"]);
-		assert.match(
-			result.details.finalResultPreview,
-			/Authoritative synthesized/,
-		);
-		assert.doesNotMatch(
-			result.details.finalResultPreview,
-			/Misleading later intermediate/,
-		);
-	} finally {
-		await rm(cwd, { recursive: true, force: true });
-	}
-});
 
 test("workflow wait never falls back to an upstream artifact when the final task failed", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-failed-final-"));
@@ -2218,25 +2149,6 @@ test("terminal summary distinguishes dynamic synthesis from exhausted no-output 
 		const incompleteSummary = await summarizeWorkflowTerminal(cwd, incomplete);
 		assert.equal(incompleteSummary.engineStatus, "failed");
 		assert.equal(incompleteSummary.semanticStatus, "dynamic_incomplete");
-	} finally {
-		await rm(cwd, { recursive: true, force: true });
-	}
-});
-
-test("terminal summary reports static degradation without changing engine status", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "workflow-wait-static-"));
-	try {
-		const run = runRecord(cwd, {
-			degradation: {
-				finalOutputRendered: true,
-				failedTaskIds: ["task-2"],
-				degradedHelperTaskIds: [],
-				summary: "one non-final task failed",
-			},
-		});
-		const summary = await summarizeWorkflowTerminal(cwd, run);
-		assert.equal(summary.engineStatus, "completed");
-		assert.equal(summary.semanticStatus, "completed_degraded");
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

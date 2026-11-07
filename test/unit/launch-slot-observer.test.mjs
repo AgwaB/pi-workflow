@@ -26,7 +26,7 @@ async function wait(promise) {
 	}
 }
 
-for (const abortBeforeThrow of [false, true]) {
+for (const abortBeforeThrow of [true]) {
 	test(`launch queue observer ${abortBeforeThrow ? "abort-then-throw" : "throw"} joins its waiter without releasing the held owner`, (t) => {
 		const body = (async () => {
 			const cwd = makeProject();

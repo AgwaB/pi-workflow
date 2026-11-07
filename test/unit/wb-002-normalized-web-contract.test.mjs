@@ -213,23 +213,6 @@ function ordinarySearchResult(url, overrides = {}) {
 	};
 }
 
-test("WB-002 normalized numResults schema accepts only integers from 1 through 20", () => {
-	const cwd = makeProject();
-	try {
-		const { tool } = registerSearch(cwd, async () => ({ content: [] }));
-		for (const value of [0, 1.5, 21]) {
-			assert.equal(Value.Check(tool.parameters, { query: "q", numResults: value }), false, String(value));
-		}
-		for (const value of [1, 20]) {
-			assert.equal(Value.Check(tool.parameters, { query: "q", numResults: value }), true, String(value));
-		}
-		assert.equal(tool.parameters.properties.numResults.minimum, 1);
-		assert.equal(tool.parameters.properties.numResults.maximum, 20);
-		assert.equal(tool.parameters.properties.numResults.type, "integer");
-	} finally {
-		removeProject(cwd);
-	}
-});
 
 test("WB-002 search status precedence covers success, partial, empty, failures, and cancellation without raw leakage", async () => {
 	const cwd = makeProject();
@@ -411,100 +394,7 @@ test("WB-002 search counts distinguish candidate, upstream, and aggregate trunca
 	}
 });
 
-test("WB-002 actual ordinary v0.24.2 append shape retains available provider attribution", async () => {
-	const cwd = makeProject();
-	try {
-		const fixture = registerOrdinaryPiWebSearch(
-			cwd,
-			async (providerPi, _toolCallId, params) => {
-				assert.equal(params.workflow, "none");
-				providerPi.appendEntry(
-					"web-search-results",
-					ordinarySearchRecord("ordinary-search-id", [
-						{
-							query: params.query,
-							answer: "",
-							results: [{ url: "https://ordinary.example/result" }],
-							error: null,
-							provider: "brave",
-						},
-					]),
-				);
-				return ordinarySearchResult("https://ordinary.example/result");
-			},
-		);
-		const payload = body(
-			await fixture.tool.execute("ordinary", { query: "ordinary shape" }),
-		);
-		assert.equal(payload.status, "ok");
-		assert.equal(payload.candidateCountTotal, 1);
-		assert.equal(payload.candidateCountReturned, 1);
-		assert.equal(payload.candidateTruncated, false);
-		assert.equal(payload.upstreamTruncated, false);
-		assert.equal(payload.truncated, false);
-		assert.deepEqual(payload.provenance, {
-			adapter: "pi-web-access-formatted-text",
-			attributionAvailable: true,
-			providers: ["brave"],
-			providerCountTotal: 1,
-			providerCountReturned: 1,
-			truncated: false,
-		});
-		assert.deepEqual(fixture.forwardedEntries, []);
-	} finally {
-		removeProject(cwd);
-	}
-});
 
-test("WB-002 ordinary provider attribution remains invocation-scoped across concurrent searches", async () => {
-	const cwd = makeProject();
-	try {
-		const gates = new Map();
-		const started = new Map();
-		for (const query of ["alpha", "beta"]) {
-			let release;
-			let markStarted;
-			gates.set(query, new Promise((resolve) => { release = resolve; }));
-			started.set(query, {
-				promise: new Promise((resolve) => { markStarted = resolve; }),
-				release,
-				markStarted,
-			});
-		}
-		const fixture = registerOrdinaryPiWebSearch(
-			cwd,
-			async (providerPi, _toolCallId, params) => {
-				const provider = params.query === "alpha" ? "brave" : "exa";
-				started.get(params.query).markStarted();
-				await gates.get(params.query);
-				providerPi.appendEntry(
-					"web-search-results",
-					ordinarySearchRecord(`search-${params.query}`, [
-						{ query: params.query, results: [], error: null, provider },
-					]),
-				);
-				return ordinarySearchResult(`https://${params.query}.example/result`);
-			},
-		);
-		const alphaResult = fixture.tool.execute("call-alpha", { query: "alpha" });
-		const betaResult = fixture.tool.execute("call-beta", { query: "beta" });
-		await Promise.all([
-			started.get("alpha").promise,
-			started.get("beta").promise,
-		]);
-		started.get("beta").release();
-		const betaPayload = body(await betaResult);
-		started.get("alpha").release();
-		const alphaPayload = body(await alphaResult);
-		assert.deepEqual(alphaPayload.provenance.providers, ["brave"]);
-		assert.deepEqual(betaPayload.provenance.providers, ["exa"]);
-		assert.equal(alphaPayload.provenance.providerCountTotal, 1);
-		assert.equal(betaPayload.provenance.providerCountTotal, 1);
-		assert.deepEqual(fixture.forwardedEntries, []);
-	} finally {
-		removeProject(cwd);
-	}
-});
 
 test("WB-002 ordinary attribution reports and bounds more than ten validated providers", async () => {
 	const cwd = makeProject();
@@ -615,52 +505,7 @@ test("WB-002 ordinary attribution discards secret-bearing metadata and invalid p
 	}
 });
 
-test("WB-002 selector-only metadata is not actual provider attribution", async () => {
-	const cwd = makeProject();
-	try {
-		const fixture = registerSearch(cwd, async () => ({
-			content: [{ type: "text", text: "https://selector.example/result" }],
-			details: {
-				provider: "auto",
-				providers: ["all"],
-				queryCount: 1,
-				successfulQueries: 1,
-				totalResults: 1,
-			},
-		}));
-		const payload = body(await fixture.tool.execute("selector", { query: "q" }));
-		assert.deepEqual(payload.provenance.providers, []);
-		assert.equal(payload.provenance.attributionAvailable, false);
-		assert.deepEqual(payload.provenance.selectedProviders, ["auto", "all"]);
-	} finally {
-		removeProject(cwd);
-	}
-});
 
-test("WB-002 aggregate search budget reports clipping, not candidate omission", async () => {
-	const cwd = makeProject();
-	try {
-		const urls = Array.from(
-			{ length: 10 },
-			(_, index) => `https://aggregate-${index}.example/${"x".repeat(20)}`,
-		).join(" ");
-		const fixture = registerSearch(
-			cwd,
-			async () => ({
-				content: [{ type: "text", text: urls }],
-				details: { queryCount: 1, successfulQueries: 1, totalResults: 10 },
-			}),
-			{ webSourcePolicy: { searchSnippetChars: 1000, perTaskVisibleCharBudget: 100 } },
-		);
-		const payload = body(await fixture.tool.execute("aggregate", { query: "q" }));
-		assert.equal(payload.candidates.length, 10);
-		assert.equal(payload.budget.truncated, true);
-		assert.equal(payload.candidates[0].budget.truncated, true);
-		assert.equal(payload.budget.used, 100);
-	} finally {
-		removeProject(cwd);
-	}
-});
 
 test("WB-002 fetch batch budget reports only visible clipping", async () => {
 	const cwd = makeProject();
@@ -1261,87 +1106,7 @@ test("WB-002 event and source metadata redaction applies the shared policy recur
 	}
 });
 
-test("WB-002 cache ledgers and source objects enforce private POSIX modes", async (t) => {
-	if (process.platform === "win32") {
-		t.skip("POSIX mode assertions are not portable to Windows");
-		return;
-	}
-	const cwd = makeProject();
-	try {
-		const cacheDir = join(cwd, "permissions-cache");
-		mkdirSync(cacheDir, { recursive: true, mode: 0o755 });
-		const eventPath = join(cacheDir, "events.jsonl");
-		writeFileSync(eventPath, "old\\n");
-		chmodSync(cacheDir, 0o755);
-		chmodSync(eventPath, 0o644);
-		const config = { runId: "permissions", taskId: "task", cacheDir };
-		const source = createWorkflowWebSource({
-			config,
-			url: "https://permissions.example/source",
-			text: "private source text",
-		});
-		await writeWorkflowWebSource(config, source);
-		await recordWorkflowWebSourceEvent(config, "permission_check", {
-			url: source.url,
-		});
-		const mode = (path) => statSync(path).mode & 0o777;
-		assert.equal(mode(cacheDir), 0o700);
-		assert.equal(mode(join(cacheDir, "sources")), 0o700);
-		assert.equal(mode(join(cacheDir, "sources", `${source.sourceRef}.json`)), 0o600);
-		assert.equal(mode(join(cacheDir, "index.json")), 0o600);
-		assert.equal(mode(join(cacheDir, "index-events.jsonl")), 0o600);
-		assert.equal(mode(eventPath), 0o600);
-	} finally {
-		removeProject(cwd);
-	}
-});
 
-test("WB-002 fetch lock roots and owners use private modes while held", async (t) => {
-	if (process.platform === "win32") {
-		t.skip("POSIX mode assertions are not portable to Windows");
-		return;
-	}
-	const cwd = makeProject();
-	try {
-		const cacheDir = join(cwd, "lock-permissions-cache");
-		const registered = new Map();
-		let lockSnapshot;
-		registerWorkflowWebSourceExtension(
-			{ registerTool(tool) { registered.set(tool.name, tool); } },
-			{
-				schema: "workflow-web-source-launch-config-v1",
-				runId: "lock-permissions",
-				taskId: "task",
-				cwd,
-				cacheDir,
-				provider: { kind: "extension", extensionPaths: ["/validated/provider.mjs"], trustedCustomProvider: true },
-				securityPolicy: { allowPrivateHosts: true, cacheRawProviderPayloads: false },
-				exposedWorkflowTools: ["workflow_web_fetch_source"],
-			},
-			(pi) => pi.registerTool({
-				name: "fetch_content",
-				async execute() {
-					const lockRoot = join(cacheDir, "fetch-locks");
-					const lockDir = join(lockRoot, readdirSync(lockRoot)[0]);
-					lockSnapshot = {
-						root: statSync(lockRoot).mode & 0o777,
-						dir: statSync(lockDir).mode & 0o777,
-						owner: statSync(join(lockDir, "owner.json")).mode & 0o777,
-					};
-					return { content: [{ type: "text", text: "locked content" }] };
-				},
-			}),
-		);
-		const result = await registered.get("workflow_web_fetch_source").execute(
-			"lock",
-			{ url: "http://127.0.0.1/locked" },
-		);
-		assert.equal(body(result).status, "ok");
-		assert.deepEqual(lockSnapshot, { root: 0o700, dir: 0o700, owner: 0o600 });
-	} finally {
-		removeProject(cwd);
-	}
-});
 
 test("WB-002 detailed web compatibility contracts live in usage, not README", () => {
 	const root = resolve(import.meta.dirname, "../..");

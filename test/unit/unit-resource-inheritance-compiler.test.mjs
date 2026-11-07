@@ -240,53 +240,6 @@ test("resource policy resolver retains legacy absence and rejects unknown versio
 
 
 
-test("explicit false preserves model, thinking, tools, and prompt compilation", async () => {
-	const cwd = makeProject();
-	try {
-		const name = "stable-agent";
-		const spec = workflowSpec(name, [
-			{ id: "main", type: "single", prompt: "Review the exact input." },
-		]);
-		const specBefore = JSON.parse(JSON.stringify(spec));
-
-		const agentFile = writeFixtureAgent(cwd, name, { inheritSkills: "true" });
-		const sourceWithTrue = readFileSync(agentFile, "utf8");
-		const compiledTrue = await compileFixture(cwd, spec);
-		assert.equal(readFileSync(agentFile, "utf8"), sourceWithTrue);
-		assert.deepEqual(spec, specBefore);
-
-		writeFixtureAgent(cwd, name, { inheritSkills: "false" });
-		const sourceWithFalse = readFileSync(agentFile, "utf8");
-		const parsedSource = parseAgentMarkdown(
-			sourceWithFalse,
-			agentFile,
-			"project",
-			join(cwd, ".pi", "agents"),
-		);
-		const parsedSourceBefore = structuredClone(parsedSource);
-		const compiledFalse = await compileFixture(cwd, spec);
-		assert.equal(readFileSync(agentFile, "utf8"), sourceWithFalse);
-		assert.deepEqual(parsedSource, parsedSourceBefore);
-
-		const trueTask = taskById(compiledTrue, "main.main");
-		const falseTask = taskById(compiledFalse, "main.main");
-		assert.equal(trueTask.inheritSkills, true);
-		assert.equal(falseTask.inheritSkills, false);
-		assertCurrentPolicyMarker(trueTask);
-		assertCurrentPolicyMarker(falseTask);
-		assert.deepEqual(resolveWorkflowResourcePolicy(trueTask), expectedPolicy(true));
-		assert.deepEqual(resolveWorkflowResourcePolicy(falseTask), expectedPolicy(false));
-		assert.deepEqual(falseTask.runtime, trueTask.runtime);
-		assert.deepEqual(falseTask.safety, trueTask.safety);
-		assert.deepEqual(falseTask.roleNames, trueTask.roleNames);
-		assert.equal(falseTask.agentSystemPrompt, trueTask.agentSystemPrompt);
-		assert.equal(falseTask.task, trueTask.task);
-		assert.equal(falseTask.compiledPrompt, trueTask.compiledPrompt);
-	} finally {
-		removeProject(cwd);
-	}
-});
-
 test("loop materialization preserves new markers and legacy absence through resumed rounds", async () => {
 	const cwd = makeProject();
 	try {

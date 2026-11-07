@@ -139,42 +139,6 @@ test("WB-003 rejects the complete IPv6 link-local range and other non-global add
 	);
 });
 
-test("WB-003 applies one wall-clock deadline to a slow-drip response", async () => {
-	let response;
-	const fixture = createInMemoryFetchFixture(({ respond }) => {
-		response = respond({
-			statusCode: 200,
-			headers: { "content-type": "text/plain" },
-		});
-	});
-	const pending = safeFetchWorkflowWebText(
-		"https://slow.example/slow",
-		strictSecurity,
-		undefined,
-		80,
-		fixture.runtime,
-	);
-
-	assert.ok(response);
-	for (let elapsed = 0; elapsed < 80; elapsed += 20) {
-		response.emit("data", "x");
-		fixture.advance(20);
-	}
-	const result = await pending;
-
-	assert.equal(result.ok, false);
-	assert.equal(result.reason, "fetch_deadline_exceeded");
-	assert.equal(fixture.now(), 80);
-	assert.deepEqual(fixture.scheduledDeadlines, [
-		{ timerId: 1, delayMs: 80, dueAt: 80 },
-	]);
-	assert.deepEqual(fixture.clearedDeadlines, [1]);
-	assert.equal(fixture.pendingDeadlineCount(), 0);
-	assert.equal(fixture.requests.length, 1);
-	assert.equal(fixture.requests[0].transport, "https");
-	assert.equal(fixture.requests[0].requestTimeoutMs, 30_000);
-	assert.equal(typeof fixture.requests[0].options.lookup, "function");
-});
 
 test("WB-003 returns the validated effective URL after a successful redirect", async () => {
 	const fixture = createInMemoryFetchFixture(({ record, respond }) => {

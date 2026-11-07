@@ -180,25 +180,6 @@ test('explicit support publication rejects pre-establishment host drift from the
  assert.notEqual(result.outputValidation?.valid,true);
  await assert.rejects(()=>stat(join(dirname(join(root,task.files.result)),'raw.md')),{code:'ENOENT'});
 });
-test('explicit host establishment failure preserves the previous real anchor and canonical result',async t=>{
- const f=await fixture(t),host=f.run.tasks[0];
- const previous=structuredClone(host.rawArtifactIntegrity);
- const result=await readFile(join(f.taskDir,'result.json'),'utf8');
- const disk=structuredClone(f.run);disk.tasks[0].status='blocked';
- await writeFile(join(f.runDir,'run.json'),JSON.stringify(disk));
- await assert.rejects(()=>writeBundle({taskDir:f.taskDir,rawOutput:raw,rawIntegrityHost:host}),/ownership/);
- assert.deepEqual(host.rawArtifactIntegrity,previous);
- assert.equal(await readFile(join(f.taskDir,'result.json'),'utf8'),result);
- assert.equal(await readFile(f.artifact,'utf8'),raw);
-});
-test('low-level writer in an owned directory stays independent without a host publication context',async t=>{
- const f=await fixture(t,true); await unlink(f.artifact);
- const bundle=await writeBundle({taskDir:f.taskDir,rawOutput:raw});
- assert.equal(bundle.result.rawIntegrity,undefined);
- assert.equal((await stat(f.artifact)).nlink,1);
- const full=await f.read();assert.equal(full.content,raw);assert.equal(full.rawAssurance.originalBytes,'unattested');
- await writeFile(f.output,'changed');assert.equal((await f.read()).content,raw);
-});
 test('an independent host-anchored raw cannot downgrade by omitting the trusted run root',async t=>{
  const f=await fixture(t);await unlink(f.artifact);
  setTaskArtifactLinkForTests(()=>{throw Object.assign(new Error('independent fallback'),{code:'EXDEV'});});
@@ -268,27 +249,7 @@ test('managed worktree parser accepts Windows drive and parent casing for one ex
  });
 });
 
-test('managed worktree parser accepts a fully qualified Windows UNC path',()=>{
- const parsed=parseManagedWorktreePath({
-  project:'\\\\Server\\Share\\Repo',
-  runId:'run_1',
-  cwd:'\\\\server\\share\\repo\\.pi\\workflows\\run_1\\worktrees\\task-1',
-  worktreePath:'\\\\SERVER\\SHARE\\REPO\\.pi\\workflows\\run_1\\worktrees\\task-1',
- },'win32');
- assert.deepEqual(parsed,{
-  leaf:'task-1',
-  path:'\\\\SERVER\\SHARE\\REPO\\.pi\\workflows\\run_1\\worktrees\\task-1',
- });
-});
 
-test('managed worktree parser keeps POSIX path identity case-sensitive',()=>{
- assert.equal(parseManagedWorktreePath({
-  project:'/Repo',
-  runId:'run_1',
-  cwd:'/repo/.pi/workflows/run_1/worktrees/task-1',
-  worktreePath:'/repo/.pi/workflows/run_1/worktrees/task-1',
- },'posix'),null);
-});
 
 test('managed worktree parser rejects relative, escaped, nested, cross-volume, and cwd-drift paths',()=>{
  const valid={

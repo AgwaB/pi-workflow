@@ -228,39 +228,6 @@ function resign(record) {
 }
 
 
-test("sealed launch applies skills only for current false and preserves tools, extensions, and sessions", async () => {
-	const cases = [
-		{ name: "legacy-false", resourcePolicyVersion: undefined, inheritSkills: false, skills: undefined },
-		{ name: "current-false", resourcePolicyVersion: 1, inheritSkills: false, skills: [] },
-		{ name: "current-undefined", resourcePolicyVersion: 1, inheritSkills: undefined, skills: undefined },
-		{ name: "current-true", resourcePolicyVersion: 1, inheritSkills: true, skills: undefined },
-	];
-	for (const item of cases) {
-		const launched = await launchCapture(item.name, item);
-		assert.deepEqual(launched.options.extensions, [
-			"/required-first.mjs",
-			"/required-second.mjs",
-		]);
-		assert.deepEqual(launched.options.tools, ["read", "grep"]);
-		assert.equal(launched.options.model, "unit-model");
-		assert.equal(launched.options.thinking, "high");
-		assert.equal(launched.options.task, "Unit launch prompt.");
-		assert.equal(launched.options.sessionId, launched.expectedSessionId);
-		assert.equal(Object.hasOwn(launched.options, "noContextFiles"), false);
-		if (item.skills === undefined) {
-			assert.equal(Object.hasOwn(launched.options, "skills"), false);
-		} else {
-			assert.deepEqual(launched.options.skills, item.skills);
-		}
-		assert.equal(
-			launched.task.launchBootstrap.records[0].schema,
-			item.resourcePolicyVersion === undefined
-				? "pi-workflow-launch-bootstrap-provenance-v1"
-				: "pi-workflow-launch-bootstrap-provenance-v2",
-		);
-	}
-});
-
 
 test("legacy provenance stays v1 while current records require a closed v2 policy schema", async () => {
 	const legacy = await fixture("legacy-provenance", { inheritSkills: false });

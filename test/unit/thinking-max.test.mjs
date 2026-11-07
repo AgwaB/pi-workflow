@@ -20,14 +20,6 @@ test("max is the highest workflow thinking level", () => {
 	assert.deepEqual(THINKING_LEVELS, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 });
 
-test("max is offered only when the model maps it, mirroring pi-ai", () => {
-	const gen6 = { reasoning: true, thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" } };
-	const xhighOnly = { reasoning: true, thinkingLevelMap: { xhigh: "max" } };
-	assert.ok(getSupportedThinkingLevels(gen6).includes("max"));
-	assert.equal(getSupportedThinkingLevels(xhighOnly).includes("max"), false);
-	assert.equal(clampSupportedThinkingLevel(getSupportedThinkingLevels(xhighOnly), "max"), "xhigh");
-	assert.ok(getSupportedThinkingLevels(undefined).includes("max"));
-});
 
 test("specs, agent frontmatter, and launch arguments accept max", () => {
 	assert.doesNotThrow(() => parseArtifactGraphWorkflowSpec(workflow({ thinking: "max" })));

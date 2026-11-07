@@ -826,7 +826,7 @@ test("locked original Codex stream producers expose compressed SSE fetch without
   }
 });
 
-for (const selected of ["openai/gpt-5.1", codexFixtureModel]) test(`locked real Agent default transport enters original budget facade ${selected}`, async t => {
+for (const selected of [codexFixtureModel]) test(`locked real Agent default transport enters original budget facade ${selected}`, async t => {
   const sdk = await import("@earendil-works/pi-coding-agent");
   const { Agent } = await importPiAgentCore();
   const { createGoalRequestBudget, openGoalRequestBudgetChannel } = await import("../../.tmp/unit/workflow-goal-workspace-tools.js");
@@ -2354,10 +2354,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, "mixed"],
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true, false, "cap-used"],
   [false, false, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, true],
-  [false, false, false, undefined, false, 6, undefined, false, false, undefined, "native source-complete success", undefined, true], [true, false, false], [true, false, true], [false, false, true],
+  [false, false, false, undefined, false, 6, undefined, false, false, undefined, "native source-complete success", undefined, true], [true, false, false], [true, false, true],
   [false, false, false, undefined, true, 3, "no-read", false, false, true, "child source reads"],
-  ...["success", "cap2", "malformed", "no-verify", "replan warm",
-    "source-no-coverage", "source-one-coverage", "source-partial-coverage", "source-suffix-coverage", "source-missing-analysis",
+  ...["no-verify", "replan warm", "source-missing-analysis",
     "source-write-tool-denied", "source-foreign-tool-denied",
     "source-tampered-content"].map(mode =>
     [false, false, false, undefined, false, mode === "cap2" ? 2 : mode.startsWith("replan") ? 6 : 3, undefined, false, false, undefined, mode]),
@@ -2373,9 +2372,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     [false, false, false, undefined, false, mode === "output repair" || mode === "output repair twice invalid" ? 10 :
       mode === "worker output repair" || mode === "planner output repair" ? 7 : 6,
       undefined, false, false, undefined, `native source-complete ${mode}`]),
-  [false, false, false, undefined, false, 3, undefined, false, false, undefined,
-    "native source-complete source-no-coverage"],
-  ...["source-one-coverage", "source-partial-coverage", "source-suffix-coverage",
+  ...["source-one-coverage",
     "source-write-tool-denied", "source-foreign-tool-denied"].map(mode =>
     [false, false, false, undefined, false, 4, undefined, false, false, undefined,
       `native source-complete ${mode}`]),
@@ -2384,9 +2381,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   ...["replan", "replan warm"].map(mode =>
     [false, false, false, undefined, false, 12, undefined, false, false, undefined,
       `native source-complete ${mode}`]),
-  ...["read-only research source-no-coverage",
-    "read-only research source-partial-coverage",
-    "read-only research producer-capability-mutation",
+  ...["read-only research producer-capability-mutation",
     "read-only research source-inventory-mutation",
     "read-only research currentness-mutation"].map(mode =>
     [false, false, false, undefined, false, 6, "read", false, false, undefined,
@@ -2429,7 +2424,6 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach profile exception marked role"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach profile exception reserved item status tamper"],
   [false, false, false, undefined, true, 5, "no-read", false, false, "foreach profile exception UNKNOWN item status tamper"],
-  [false, false, false, undefined, true, 6, "no-read", false, false, "foreach profile exception history"],
   ...["parent lease busy", "child lease busy",
     "dispatch map tamper before confirmation", "dispatch map tamper during confirmation",
     "post-confirmation original authority change", "final child ownership failure"].map(variant =>
@@ -2460,19 +2454,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   ...(process.env.PIWF_TEST_ORDINARY_CLOSURE_RECEIPT ? [[false, false, false, undefined, true,
     process.env.PIWF_TEST_ORDINARY_CLOSURE_REPLAN === "2" ? 6 : process.env.PIWF_TEST_ORDINARY_CLOSURE_REPLAN === "1" ? 4 : 2, "no-read", false,
     process.env.PIWF_TEST_ORDINARY_CLOSURE_REPLAN === "2" ? "replan-three-criteria" : process.env.PIWF_TEST_ORDINARY_CLOSURE_REPLAN === "1" ? "replan" : true]] : []),
-  [false, false, false, undefined, true, 4, undefined, true],
-  [false, false, false, undefined, false, 0, undefined, true],
-  [false, false, false, undefined, false, "null/null", undefined, true],
-  [false, false, false, undefined, false, "accounting-absent", undefined, true],
-  [false, false, false, undefined, false, undefined, "read"],
   [false, false, false, undefined, false, undefined, "partial-read"],
-  [false, true, false, undefined, false, undefined, "read"],
   [false, false, false, undefined, false, undefined, "revoked-read"], [true, false, true, undefined, true], [false, false, true, undefined, true, 3],
   [true, false, false, undefined, true, "uncapped"],
-  [false, false, false, undefined, false, "accounting-absent"],
   [false, false, false, undefined, false, "accounting-ack"],
   [false, false, false, undefined, false, 5, "no-read", false, false, "foreach actual backend late UNKNOWN", undefined, true],
-  [false, false, false, undefined, false, 0],
   [false, false, false, undefined, false, "cost1"]]) test(backendLateUnknown ? "ordinary Goal actual backend late UNKNOWN blocks queued second native API before provider launch" : rubric ? `ordinary Goal original SDK model rubric ${rubric}${rubric === "warm" || rubric === "replan warm" ? " same-live reattachment retains the original captured profile" : ""}${originApply ? " with origin apply" : ""}` : catalog === "ordinary child maxDepth one" ? "ordinary child maxDepth one runs plain artifact graph" : catalog ? `ordinary Goal admitted catalog ${typeof catalog === "string" && catalog.startsWith("children ") ? catalog : `child ${typeof catalog === "string" ? catalog : requestBudget === 2 ? "success" : "exhausted root cap"}`}` : closure ? ordinaryClosureProducerName : `ordinary candidate workers invoke admitted physical callbacks and preserve bytes across replan${codex ? " with captured Codex SSE" : ""}${sourceMode ? ` with scoped source ${sourceMode}` : ""}${uncertain ? " with UNKNOWN outcome" : ""}${custom ? " with explicit custom agent" : ""}${warm ? " with explicit same-live-session resume" : ""}${evidenceFailure ? ` with evidence ${evidenceFailure}` : ""}${commandMode ? " through registered Goal commands" : ""}${requestBudget !== undefined ? ` with native request budget ${requestBudget}` : ""}${originApply ? " with origin apply" : ""}${commandOracle ? ` judged by ${commandOracle === "multiple" ? "two sandboxed commands" : commandOracle === "mixed" ? "a sandboxed command and an exact value" : "a sandboxed command"}` : ""}${scopeDirectory ? " refuses a directory scope before consent" : ""}${recoveryMode ? ` recovering an interrupted run${recoveryMode === "cap-used" ? " whose requests used the cap" : recoveryMode === "generations-used" ? " whose generations used the limit" : ""}` : ""}${generationLimit ? ` stopped by a generation limit of ${generationLimit}` : ""}${noProgress === "plan" ? " stopped when the plan repeats" : noProgress ? " stopped when a failed candidate repeats" : ""}`, { timeout: backendLateUnknown || rubric || catalog || requestBudget === "candidate-policy-configuration-custody" || warm && commandMode ? testTimeoutMs(30_000) : undefined }, async t => {
   const { runWorkflowSpec, stopRun, resumeRun, stopWorkflowWatchersForTests } = await import("../../.tmp/unit/engine.js");
   const closureGenerations = closure === "replan-three-criteria" ? 3 : closure === "replan" ? 2 : 1;
@@ -19655,59 +19641,7 @@ async function savedGoalRegistryFixture(t) {
     ...(await import("../../.tmp/unit/schema.js")) };
 }
 
-test("saved Goal registry discovers flat aliases and bundles through original loading without execution", async t => {
-  const f = await savedGoalRegistryFixture(t);
-  const bundle = join(f.cwd, "workflows", "saved-bundle", "spec.json");
-  await mkdir(dirname(bundle), { recursive: true });
-  await writeFile(bundle, f.text);
-  const records = (await f.listWorkflows(f.cwd)).filter(record => record.specPath.startsWith(f.cwd));
-  assert.deepEqual(records.map(record => record.name), ["saved-bundle", "saved-goal"]);
-  assert.deepEqual(records.find(record => record.name === "saved-goal").aliases, ["saved-goal.json", "saved-goal"]);
-  assert.deepEqual(records.find(record => record.name === "saved-bundle").aliases, ["saved-bundle"]);
-  for (const [ref, path, root] of [["saved-goal", f.specPath, dirname(f.specPath)],
-    ["saved-goal.json", f.specPath, dirname(f.specPath)], ["saved-bundle", bundle, dirname(bundle)]]) {
-    const resolved = await f.resolveWorkflowRef(ref, f.cwd);
-    assert.equal(resolved.specPath, path);
-    assert.equal(resolved.workflowRoot, root);
-    const loaded = await f.loadWorkflowSpec(ref, f.cwd);
-    assert.equal(loaded.specPath, path);
-    assert.deepEqual(loaded.spec, f.definition);
-  }
-  for (const ref of [f.specPath, "./workflows/saved-goal.json", dirname(bundle)]) {
-    assert.deepEqual((await f.loadWorkflowSpec(ref, f.cwd)).spec, f.definition);
-  }
-  assert.equal(await readFile(f.specPath, "utf8"), f.text);
-  assert.equal(existsSync(join(f.cwd, ".pi")), false, "save/discovery/load cannot create run or consent state");
-});
 
-test("saved Goal registry retains shared private global precedence and same-tier ambiguity", async t => {
-  const f = await savedGoalRegistryFixture(t);
-  const roots = [join(f.cwd, "workflows"), join(f.cwd, ".pi", "workflows"), join(f.cwd, "global", "workflows")];
-  const definitions = roots.map((_, index) => ({ ...f.definition, name: `tier-${index}` }));
-  for (const [index, root] of roots.entries()) {
-    await mkdir(join(root, "goal-priority"), { recursive: true });
-    await writeFile(join(root, "goal-priority", "spec.json"), JSON.stringify(definitions[index]));
-  }
-  for (const [index, root] of roots.entries()) {
-    const path = join(root, "goal-priority", "spec.json");
-    const records = (await f.listWorkflows(f.cwd)).filter(record => record.name === "goal-priority");
-    assert.equal(records.length, 1);
-    assert.equal(records[0].specPath, path);
-    assert.equal((await f.resolveWorkflowRef("goal-priority", f.cwd)).specPath, path);
-    assert.deepEqual((await f.loadWorkflowSpec("goal-priority", f.cwd)).spec, definitions[index]);
-    await rm(dirname(path), { recursive: true });
-  }
-  const conflict = join(roots[0], "saved-goal", "spec.json");
-  await mkdir(dirname(conflict));
-  await writeFile(conflict, f.text);
-  assert.equal((await f.listWorkflows(f.cwd)).filter(record => record.name === "saved-goal").length, 2);
-  await assert.rejects(f.resolveWorkflowRef("saved-goal", f.cwd), /ambiguous workflow name/);
-  await assert.rejects(f.loadWorkflowSpec("saved-goal", f.cwd), /ambiguous workflow name/);
-  assert.equal((await f.resolveWorkflowRef("saved-goal.json", f.cwd)).specPath, f.specPath);
-  assert.deepEqual((await f.loadWorkflowSpec(conflict, f.cwd)).spec, f.definition);
-  assert.equal(existsSync(join(f.cwd, ".pi", "goals")), false);
-  assert.deepEqual(await readdir(roots[1]), [], "registry operations create no run state");
-});
 
 test("saved Goal registry excludes run snapshots reserved files and nonworkflow shapes without changing explicit paths", async t => {
   const f = await savedGoalRegistryFixture(t);

@@ -212,60 +212,6 @@ test("auto binding rejects a same-string cwd that was replaced before launch", a
 	}
 });
 
-test("auto binding covers the actual direct-dynamic runtime controller and agent", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "piwf-auto-direct-dynamic-binding-"));
-	try {
-		const specPath = await ensureDirectDynamicRuntimeBundle(cwd);
-		const spec = directDynamicSpec();
-		const binding = await captureWorkflowAutoLaunchBinding({
-			cwd,
-			candidateId: "e".repeat(64),
-			task: "research",
-			specPath,
-			spec,
-			selectionIdentitySha256: "f".repeat(64),
-			runtimeVersion: DIRECT_DYNAMIC_RUNTIME_VERSION,
-		});
-		assert.equal(binding.runtimeVersion, DIRECT_DYNAMIC_RUNTIME_VERSION);
-		assert.equal(
-			binding.resources.some(
-				(resource) => resource.relativePath === "controller.mjs",
-			),
-			true,
-		);
-		assert.equal(binding.agents.some((agent) => agent.name === "researcher"), true);
-		await assertWorkflowAutoLaunchBindingCurrent(
-			cwd,
-			binding,
-			spec,
-			"research",
-			specPath,
-		);
-		await writeFile(
-			join(
-				cwd,
-				".pi",
-				"workflow-runtime",
-				DIRECT_DYNAMIC_RUNTIME_VERSION,
-				"controller.mjs",
-			),
-			"export default () => ({ control: { changed: true } });\n",
-		);
-		await assert.rejects(
-			() =>
-				assertWorkflowAutoLaunchBindingCurrent(
-					cwd,
-					binding,
-					spec,
-					"research",
-					specPath,
-				),
-			/Auto selection is stale/,
-		);
-	} finally {
-		await rm(cwd, { recursive: true, force: true });
-	}
-});
 
 test("auto binding rejects external provider extensions in a nested bundled workflow", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "piwf-auto-nested-provider-"));

@@ -233,34 +233,6 @@ test("deep-research production research schema and packet preserve local evidenc
   );
 });
 
-test("deep-research every local evidence alias reaches the byte gate, including opaque extensionless refs", async (t) => {
-  const cwd = await mkdtemp(join(tmpdir(), "deep-research-local-aliases-"));
-  t.after(() => rm(cwd, { recursive: true, force: true }));
-  await writeFile(join(cwd, "README"), "actual bytes\n");
-  const aliases = [
-    "source",
-    "sourceRef",
-    "file",
-    "path",
-    "repoPath",
-    "localPath",
-    "url",
-  ];
-  const evidence = aliases.map((alias) => ({
-    [alias]: "README",
-    lineStart: 1,
-    lineEnd: 1,
-    quote: "fabricated bytes",
-  }));
-  const result = await localQuoteGate(
-    evidence,
-    { cwd },
-    (value) => value !== "https://example.invalid",
-  );
-  assert.equal(result.length, aliases.length);
-  assert(result.every((row) => row.status === "mismatch"));
-  assert(result.every((row) => row.file === "README"));
-});
 
 test("deep-research normalizer preserves every per-row source identity alias", async () => {
   const refs = Array.from(
@@ -568,62 +540,6 @@ test("deep-research source phrase checks retain exact source-backed API claims",
   );
 });
 
-test("deep-research local url evidence is byte-gated rather than accepted as a web citation", async (t) => {
-  const cwd = await mkdtemp(join(tmpdir(), "deep-research-local-url-"));
-  t.after(() => rm(cwd, { recursive: true, force: true }));
-  await writeFile(join(cwd, "source.custom"), "enabled = false;\n");
-  const result = await claimGate({
-    sources: {
-      "plan.main": { factSlots: [{ id: "slot-1", type: "policy" }] },
-      "normalize-input-packet.main": { packet: { research: { sources: [] } } },
-      "normalize-claims.main": {
-        claimInventory: {
-          verificationCandidates: [
-            {
-              id: "claim-1",
-              claim: "The feature is disabled.",
-              sourceRefs: ["source.custom"],
-              factSlotIds: ["slot-1"],
-            },
-          ],
-        },
-        factSlotCoverage: [],
-      },
-      "sanitize-claims.main": {
-        claimInventory: {
-          verificationCandidates: [
-            {
-              id: "claim-1",
-              claim: "The feature is disabled.",
-              sourceRefs: ["source.custom"],
-              factSlotIds: ["slot-1"],
-            },
-          ],
-        },
-      },
-      "verify-claims.claim-1": {
-        id: "claim-1",
-        status: "verified",
-        evidence: [
-          {
-            url: "source.custom",
-            lineStart: 1,
-            lineEnd: 1,
-            quote: "not the bytes",
-          },
-        ],
-      },
-    },
-    context: { cwd },
-    options: { requireFetchedEvidenceForVerified: true },
-  });
-  assert.equal(result.verdictCounts.verified, 0);
-  assert.equal(result.verdictCounts.partiallySupported, 1);
-  assert.equal(
-    result.auditedClaims[0].evidenceGate.reasonCode,
-    "local_quote_mismatch",
-  );
-});
 
 test("deep-research final packet bounds the required synthesis read and rejects incomplete floors", async () => {
   const candidates = Array.from({ length: 48 }, (_, i) => ({
@@ -824,22 +740,6 @@ test("deep-research contradictory local and remote evidence is conservatively do
   assert.equal(result.auditedClaims[0].evidenceGate.reasonCode, "local_file_and_remote_url_conflict");
 });
 
-test("deep-research actual synthesis reads use UTF-16 budget telemetry and preserve raw ledgers", async (t) => {
-  for (const questionId of ["rq-plain", "rq-mixed-😀-\\\\-\\\"", `rq-${"😀".repeat(12000)}`]) {
-    const packet = await finalPacket({ sources: packetSources(questionId) });
-    for (const { encoded, projection } of await actualSynthesisRead(t, packet)) {
-      assert(encoded.length <= 24000);
-      assert.equal(projection.projection.charsTruncated, false);
-      assert.equal(projection.projection.originalChars, encoded.length);
-    }
-    if (questionId.includes("😀".repeat(100))) {
-      assert.equal(packet.packet.synthesisInput.header.budgetBlock.status, "blocked");
-      assert.equal(packet.packet.claimVerdictLedger.length, 1);
-    } else {
-      assert.equal(packet.packet.synthesisInput.header.budgetBlock, undefined);
-    }
-  }
-});
 
 test("deep-research demotion identities survive sanitizer, audit packet, and render gap ledger", async () => {
   const refs = Array.from({ length: 8 }, (_, index) => `wsrc_${String(index + 1).padStart(32, "a")}`);

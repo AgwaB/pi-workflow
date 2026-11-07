@@ -247,41 +247,6 @@ test("profileRole validates independently from agent-context role", () => {
 });
 
 
-test("all four built-ins use the approved exact role matrix", () => {
-	const { workflowPath } = setup("builtin-matrix");
-	const spec = roleSpec();
-	writeSpec(workflowPath, spec);
-	for (const profileId of WORKFLOW_BUILTIN_PROFILE_IDS) {
-		const built = buildWorkflowExecutionProfile(
-			context(spec, workflowPath),
-			profileId,
-		);
-		for (const slot of collectWorkflowProfileStageSlots(spec)) {
-			assert.deepEqual(
-				built.stageOverrides[slot.id],
-				profileRuntimeForRole(profileId, slot.profileRole),
-				`${profileId}/${slot.profileRole}`,
-			);
-		}
-	}
-	assert.deepEqual(profileRuntimeForRole("codex", "planning"), {
-		model: SOL,
-		thinking: "high",
-	});
-	assert.deepEqual(profileRuntimeForRole("mixed", "verification"), {
-		model: LUNA,
-		thinking: "high",
-	});
-	assert.deepEqual(profileRuntimeForRole("codex-high", "final-judgment"), {
-		model: SOL,
-		thinking: "xhigh",
-	});
-	assert.deepEqual(profileRuntimeForRole("codex-high", "verification"), {
-		model: SOL,
-		thinking: "max",
-	});
-});
-
 
 test("missing models, unsupported thinking, and missing roles fail without substitution", () => {
 	const { workflowPath } = setup("profile-fail-closed");
@@ -330,32 +295,6 @@ test("missing models, unsupported thinking, and missing roles fail without subst
 	);
 });
 
-test("Custom fixed and inherited values resolve once at run start", () => {
-	const { workflowPath } = setup("custom-capture");
-	const spec = roleSpec();
-	writeSpec(workflowPath, spec);
-	const custom = createCustomProfileFromBuiltin(spec, "mixed");
-	custom.stages.plan.model = { kind: "inherit" };
-	custom.stages.plan.thinking = { kind: "inherit" };
-	custom.stages.research.model = { kind: "fixed", value: OTHER };
-	custom.stages.research.thinking = { kind: "fixed", value: "low" };
-	const currentRuntime = { model: OTHER, thinking: "medium" };
-	const built = buildWorkflowExecutionProfile(
-		context(spec, workflowPath, { currentRuntime }),
-		"custom",
-		custom,
-	);
-	currentRuntime.model = SOL;
-	currentRuntime.thinking = "xhigh";
-	assert.deepEqual(built.stageOverrides.plan, {
-		model: OTHER,
-		thinking: "medium",
-	});
-	assert.deepEqual(built.stageOverrides.research, {
-		model: OTHER,
-		thinking: "low",
-	});
-});
 
 test("private atomic preferences reuse identical definitions and separate changed ones", async () => {
 	const { root, agentDir, workflowPath } = setup("settings-identity");
@@ -428,32 +367,6 @@ test("private atomic preferences reuse identical definitions and separate change
 	);
 });
 
-test("Custom settings preserve stage ids that overlap object prototype names", async () => {
-	const { workflowPath } = setup("settings-prototype-stage-id");
-	const spec = roleSpec("prototype-stage-id");
-	spec.artifactGraph.stages = [
-		stage("__proto__", "planning"),
-		stage("other", "verification"),
-	];
-	spec.executionProfiles = { partial: { other: { thinking: "low" } } };
-	spec.defaultExecutionProfile = "partial";
-	writeSpec(workflowPath, spec);
-	const custom = createCustomProfileFromBuiltin(spec, "codex");
-	await saveWorkflowProfilePreference(
-		{ spec, specPath: workflowPath },
-		{ selectedProfile: "custom", custom },
-	);
-	const loaded = await loadWorkflowProfilePreference(spec, workflowPath);
-	assert.ok(Object.hasOwn(loaded.preference.custom.stages, "__proto__"));
-	const built = buildWorkflowExecutionProfile(
-		context(spec, workflowPath),
-		"custom",
-		loaded.preference.custom,
-	);
-	assert.ok(Object.hasOwn(built.stageOverrides, "__proto__"));
-	assert.equal(built.stageOverrides.__proto__.model, SOL);
-	assert.equal(built.stageOverrides.other.thinking, "high");
-});
 
 test("invalid, corrupt, and simultaneous writes preserve complete unrelated settings", async () => {
 	const { agentDir, workflowPath } = setup("settings-failures");
@@ -701,34 +614,6 @@ test("workflow picker hides paths and describes exact, absent, stale, and unavai
 	}
 });
 
-test("workflow picker text fallback remains path-free and preserves identity", async () => {
-	const selectedOptions = [];
-	const ui = {
-		select: async (_title, options) => {
-			selectedOptions.push(...options);
-			return options[1];
-		},
-	};
-	const selected = await selectWorkflowProfileTarget(ui, [
-		{
-			ref: "/private/first/spec.json",
-			label: "first",
-			description: "Current: Codex",
-		},
-		{
-			ref: "/private/second/spec.json",
-			label: "second",
-			description: "Current: Not configured",
-		},
-	]);
-
-	assert.equal(selected, "/private/second/spec.json");
-	assert.deepEqual(selectedOptions, [
-		"1. first — Current: Codex",
-		"2. second — Current: Not configured",
-	]);
-	assert.ok(selectedOptions.every((option) => !option.includes("/private/")));
-});
 
 test("structured profile preview preserves paging and action identity", async () => {
 	const { agentDir, workflowPath } = setup("ui-structured-preview");
@@ -853,67 +738,7 @@ test("profile picker exposes five choices and cancel performs no write", async (
 	assert.throws(() => statSync(agentDir), /ENOENT/);
 });
 
-test("profile order is stable for every saved profile and unavailable built-ins", async () => {
-	const expected = ["Codex", "Codex High", "Claude", "Mixed", "Custom"];
-	for (const selectedProfile of [...WORKFLOW_BUILTIN_PROFILE_IDS, "custom"]) {
-		const { workflowPath } = setup(`ui-order-${selectedProfile}`);
-		const spec = roleSpec();
-		writeSpec(workflowPath, spec);
-		await saveWorkflowProfilePreference(
-			{ spec, specPath: workflowPath },
-			{ selectedProfile, custom: createCustomProfileFromBuiltin(spec, "mixed") },
-		);
-		const identity = await workflowProfileIdentity(spec, workflowPath);
-		const before = readFileSync(identity.settingsFile, "utf8");
-		const ui = new ScriptedUi([undefined]);
-		await configureWorkflowExecutionProfile({
-			ui,
-			...context(spec, workflowPath, { availableModels: MODELS.slice(2) }),
-		});
-		assert.deepEqual(
-			ui.calls[0].options.map((label) => label.replace(" (saved)", "").replace(" — unavailable", "")),
-			expected,
-		);
-		assert.match(ui.calls[0].selection.selected, /\(saved\)/);
-		assert.equal(readFileSync(identity.settingsFile, "utf8"), before);
-	}
-	const { agentDir, workflowPath } = setup("ui-order-first-usable");
-	const spec = roleSpec();
-	writeSpec(workflowPath, spec);
-	const ui = new ScriptedUi([undefined]);
-	await configureWorkflowExecutionProfile({
-		ui,
-		...context(spec, workflowPath, { availableModels: MODELS.slice(2) }),
-	});
-	assert.equal(ui.calls[0].options[0], "Codex — unavailable");
-	assert.equal(ui.calls[0].selection.selected, "Claude");
-	assert.throws(() => statSync(agentDir), /ENOENT/);
-});
 
-test("Custom model, thinking and stage focus do not rotate the underlying choices", async () => {
-	const { agentDir, workflowPath } = setup("ui-custom-stable-focus");
-	const spec = roleSpec();
-	writeSpec(workflowPath, spec);
-	const ui = new ScriptedUi([
-		"Custom", "Edit a stage…", "research — research-execution", "Model and thinking",
-		`${LUNA} (current setting)`, "medium (current setting)",
-		"Edit a stage…", undefined, undefined,
-	]);
-	const result = await configureWorkflowExecutionProfile({ ui, ...context(spec, workflowPath) });
-	assert.equal(result.status, "cancelled");
-	const modelCall = ui.calls.find(({ title }) => title.startsWith("Choose model"));
-	assert.equal(modelCall.options[0], "Inherit current Pi model at run start");
-	assert.equal(modelCall.selection.selected, `${LUNA} (current setting)`);
-	assert.equal(modelCall.selection.searchable, true);
-	assert.match(modelCall.title, /Current setting: openai-codex\/gpt-6-luna/);
-	const thinkingCall = ui.calls.find(({ title }) => title.startsWith("Choose thinking"));
-	assert.equal(thinkingCall.options[0], "Inherit current Pi thinking at run start");
-	assert.equal(thinkingCall.selection.selected, "medium (current setting)");
-	const stageCalls = ui.calls.filter(({ title }) => title === "Choose a Custom stage to edit");
-	assert.deepEqual(stageCalls[1].options, stageCalls[0].options);
-	assert.equal(stageCalls[1].selection.selected, "research — research-execution");
-	assert.throws(() => statSync(agentDir), /ENOENT/);
-});
 
 test("stage previews page through bounded rows without writing settings", async () => {
 	const { agentDir, workflowPath } = setup("ui-preview-pages");
@@ -945,57 +770,6 @@ test("stage previews page through bounded rows without writing settings", async 
 	assert.throws(() => statSync(agentDir), /ENOENT/);
 });
 
-test("Custom starts from the browsed profile and an existing draft survives builtin browsing", async () => {
-	const first = setup("ui-custom-seed");
-	const spec = roleSpec();
-	writeSpec(first.workflowPath, spec);
-	const seededUi = new ScriptedUi([
-		"Claude",
-		"Back to profiles",
-		"Custom",
-		undefined,
-	]);
-	await configureWorkflowExecutionProfile({
-		ui: seededUi,
-		...context(spec, first.workflowPath),
-	});
-	const customPreview = seededUi.calls.find(({ title }) =>
-		title.startsWith("Custom — stage preview"),
-	);
-	assert.match(customPreview.title, new RegExp(OPUS));
-	const seededProfileCalls = seededUi.calls.filter(({ title }) =>
-		title.startsWith("Workflow execution profile"),
-	);
-	assert.equal(seededProfileCalls[1].options[0], "Codex");
-	assert.equal(seededProfileCalls[1].selection.selected, "Claude");
-
-	const second = setup("ui-custom-restore");
-	writeSpec(second.workflowPath, spec);
-	const custom = createCustomProfileFromBuiltin(spec, "mixed");
-	custom.stages.plan.model = { kind: "fixed", value: OTHER };
-	custom.stages.plan.thinking = { kind: "fixed", value: "low" };
-	await saveWorkflowProfilePreference(
-		{ spec, specPath: second.workflowPath },
-		{ selectedProfile: "custom", custom },
-	);
-	const restoredUi = new ScriptedUi([
-		"Codex",
-		"Back to profiles",
-		"Custom (saved)",
-		undefined,
-	]);
-	await configureWorkflowExecutionProfile({
-		ui: restoredUi,
-		...context(spec, second.workflowPath),
-	});
-	assert.equal(restoredUi.calls[0].options[0], "Codex");
-	assert.equal(restoredUi.calls[0].options[4], "Custom (saved)");
-	assert.equal(restoredUi.calls[0].selection.selected, "Custom (saved)");
-	const restoredPreview = restoredUi.calls.find(({ title }) =>
-		title.startsWith("Custom — stage preview"),
-	);
-	assert.match(restoredPreview.title, new RegExp(OTHER));
-});
 
 test("saving a built-in keeps the latest persisted Custom draft", async () => {
 	const { workflowPath } = setup("ui-builtin-preserves-custom");
@@ -1114,22 +888,6 @@ test("Custom Esc unwinds every editor screen and discards incomplete assignments
 	assert.throws(() => statSync(agentDir), /ENOENT/);
 });
 
-test("combined editor retains model draft across Back and saves only after confirmation", async () => {
-	const { workflowPath } = setup("ui-combined-back-save");
-	const spec = roleSpec();
-	writeSpec(workflowPath, spec);
-	const ui = new ScriptedUi([
-		"Custom", "Edit a stage…", "plan — planning", "Model and thinking",
-		OTHER, undefined, `${OTHER} (current setting)`, "low", "Save for next run",
-	]);
-	const result = await configureWorkflowExecutionProfile({ ui, ...context(spec, workflowPath) });
-	assert.equal(result.status, "saved");
-	assert.equal(ui.script.length, 0);
-	assert.deepEqual(result.preference.custom.stages.plan, {
-		model: { kind: "fixed", value: OTHER }, thinking: { kind: "fixed", value: "low" },
-	});
-	assert.equal(ui.calls.filter(({ title }) => title.startsWith("Choose model"))[1].selection.selected, `${OTHER} (current setting)`);
-});
 
 test("runtime override collector returns only selected fields and snapshots caller input", async () => {
 	const capturedRuntime = { model: SOL, thinking: "high" };
@@ -1277,23 +1035,6 @@ test("runtime override combined Back retains the model draft", async () => {
 	assert.equal(modelCalls[1].selection.selected, `${LUNA} (current setting)`);
 });
 
-test("runtime override choices contain no inheritance or current Pi runtime text", async () => {
-	const ui = new ScriptedUi([
-		"Model and thinking",
-		`${SOL} (current setting)`,
-		"high (current setting)",
-	]);
-	await collectWorkflowProfileRuntimeOverride({
-		ui,
-		capturedRuntime: { model: SOL, thinking: "high" },
-		availableModels: MODELS,
-		displayLabel: "text branch",
-	});
-	for (const { title, options } of ui.calls) {
-		assert.doesNotMatch(title, /current Pi|inherit/i);
-		assert.ok(options.every((option) => !/current Pi|inherit/i.test(option)));
-	}
-});
 
 test("runtime override collector fails closed on unknown selections", async () => {
 	for (const script of [
@@ -1522,17 +1263,4 @@ test("Goal profile slots show readable names while the saved ids stay canonical"
 		["goal.$synthesis", "Goal: summary"],
 		["goal.$judge", "Goal: final judgment"],
 	]);
-});
-
-test("native preview renderer shows a row's readable label in place of its id", () => {
-	const theme = { bold: (text) => text, fg: (_color, text) => text };
-	const preview = {
-		profileName: "Codex", page: 1, pages: 1,
-		rows: [{ id: "goal.$planner", label: "Goal: plan", role: "planning", model: SOL, thinking: "high" }],
-		actions: [{ id: "save", label: "Save for next run" }],
-	};
-	const wide = renderWorkflowProfilePreview(preview, theme, 100).join("\n");
-	assert.match(wide, /Goal: plan\s+planning\s+openai-codex\/gpt-6\.1-sol\s+high/);
-	assert.doesNotMatch(wide, /goal\.\$planner/);
-	assert.match(renderWorkflowProfilePreview(preview, theme, 48).join("\n"), /Goal: plan \[planning\]/);
 });

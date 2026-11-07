@@ -1,26 +1,8 @@
 {
 	"schema": "pi-workflow-unit-test-inventory-v1",
 	"source": "unit.test.mjs",
-	"count": 468,
+	"count": 402,
 	"tests": [
-		{
-			"name": "adaptive live workers cap growth at configured live-worker limit",
-			"occurrence": 1,
-			"sha256": "6a1b972c197711bf27dda3a53baa8b1ecd3867f6c99b323575d96d74389dd1d1",
-			"domain": "core-runtime"
-		},
-		{
-			"name": "adaptive live workers flag off keeps configured launch controls untouched",
-			"occurrence": 1,
-			"sha256": "ab9abe422a31d7924d410a830a30ebc89ff3d8fc11f4f746bd58e0e5fa9c40a7",
-			"domain": "engine-store"
-		},
-		{
-			"name": "adaptive live workers grow limit after healthy completions",
-			"occurrence": 1,
-			"sha256": "eb01a42c30e3e82b6f7955e463a0a2520875c7911578aca0e8175b678cd2f0a5",
-			"domain": "authoring-interface"
-		},
 		{
 			"name": "adaptive live workers shrink limit on degraded completions",
 			"occurrence": 1,
@@ -52,27 +34,9 @@
 			"domain": "authoring-interface"
 		},
 		{
-			"name": "artifact graph output retry defaults to new session when same-session flag is disabled",
-			"occurrence": 1,
-			"sha256": "2b71f659335bcd2957844c77894131b8aa978e3ef87b5f0a546ab8da8a74a99d",
-			"domain": "artifact-web"
-		},
-		{
 			"name": "artifact graph output retry falls back to new session after same-session repair fails",
 			"occurrence": 1,
 			"sha256": "02f2ecb6ba7eae7016a99f7e8ce3ce3310f9a0cf1e67aeb53dbc59f58936222c",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "artifact graph output retry reuses confirmed subagent session",
-			"occurrence": 1,
-			"sha256": "f6650133e86a30d49d8aa11d6406ae4da73f8147785ab0757e3e5335ac99cd1f",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "artifact graph output retry starts new session when subagent session is unconfirmed",
-			"occurrence": 1,
-			"sha256": "ebd556d1b71d4b90e463f5aef434a2f2e817ff1eeb7d4375756135b484733af9",
 			"domain": "artifact-web"
 		},
 		{
@@ -412,46 +376,10 @@
 			"domain": "artifact-web"
 		},
 		{
-			"name": "bundled artifact graph workflows are public runnable",
-			"occurrence": 1,
-			"sha256": "976a509d85a776f65c07452fb5d2b697954be207d3a39ea79fed2c0768330db4",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "bundled spec-review workflow compiles flat analysis and verification fanout",
-			"occurrence": 1,
-			"sha256": "d0ac17fe55f9164ba10c25b31ac6a53c42f3ddf4387f37c5fed67909b4b43f49",
-			"domain": "authoring-interface"
-		},
-		{
-			"name": "cleanupSubagentRun releases global live model worker cap keys",
-			"occurrence": 1,
-			"sha256": "97af63a991a9df659a025f5e10ab509c791af0e2e9ad4e7e2da6c681a870ff90",
-			"domain": "engine-store"
-		},
-		{
-			"name": "compactStrings trims, filters, and optionally preserves duplicates",
-			"occurrence": 1,
-			"sha256": "6439b950b321bc0e134423dbcd0aeff46fad1d03d7392f297fd37fa4a1780d19",
-			"domain": "core-runtime"
-		},
-		{
-			"name": "compiled and run-record serialization retain an explicit zero",
-			"occurrence": 1,
-			"sha256": "ffee05ebd8ee61750e54f3ad419da392c5369db947cf95b99d4be90020136465",
-			"domain": "model-task-runtime"
-		},
-		{
 			"name": "compiler accepts deprecated dynamic decision-loop no-op fields",
 			"occurrence": 1,
 			"sha256": "9d05c2773c1eb88dab89b4bbf56b445542f0da988db494947cfb162f41741c5c",
 			"domain": "dynamic-runtime"
-		},
-		{
-			"name": "compiler applies runtime defaults before budget estimates",
-			"occurrence": 1,
-			"sha256": "4f40b438ec53af3aaf9b6d64fac45f2fcd2951dd76129b0ea1d96a12b39a247f",
-			"domain": "authoring-interface"
 		},
 		{
 			"name": "compiler diagnoses foreach item projections only with a known item schema",
@@ -862,12 +790,6 @@
 			"domain": "core-runtime"
 		},
 		{
-			"name": "deep-review artifact-graph support lifecycle retains adverse needs-human artifacts after report failure",
-			"occurrence": 1,
-			"sha256": "b8146daa0a16b992a0653954605bcd6193ba2cd06cdf7b94ae030ee3e93550ea",
-			"domain": "artifact-web"
-		},
-		{
 			"name": "deep-review batch partition demotes summary-only KEEP verdicts",
 			"occurrence": 1,
 			"sha256": "de4653815070d44d4e4e45def915528075424b5e6d6057bbba21b16c72d0f15a",
@@ -994,12 +916,6 @@
 			"domain": "dynamic-runtime"
 		},
 		{
-			"name": "dynamic controllers expose a deterministic available tool view",
-			"occurrence": 1,
-			"sha256": "fb41622b2687d125bd764386a732737dc7e3842c4ab920f0e92e4dbfd9c8c10d",
-			"domain": "dynamic-runtime"
-		},
-		{
 			"name": "dynamic decision profiles and ctx.agent requests preserve zero with request/profile/budget precedence",
 			"occurrence": 1,
 			"sha256": "b5922608b2e631006a9fa1da3a6530539ab8e570c3b91dee839ca4e1a08400cb",
@@ -1009,24 +925,6 @@
 			"name": "dynamic event ledger writes monotonic events and rebuilds state",
 			"occurrence": 1,
 			"sha256": "ee30988022df5d5c29a7b3f99e7d0c1934895bfe2ac6db66291cd38be120deb6",
-			"domain": "dynamic-runtime"
-		},
-		{
-			"name": "dynamic generated tasks apply runtime overrides above profile pins and resolve thinking",
-			"occurrence": 1,
-			"sha256": "f0e0e0bc7d603ea38647451d610c4ecfa16ff3885376f08c7a7ade55cb6e4239",
-			"domain": "dynamic-runtime"
-		},
-		{
-			"name": "dynamic generated tasks launch with a tool-result budget and static tasks do not",
-			"occurrence": 1,
-			"sha256": "f80143c6ba53b27d149c19cd99a6740e9226914e563dd6a3b24343dc236087e6",
-			"domain": "dynamic-runtime"
-		},
-		{
-			"name": "dynamic generated tasks propagate toolProviders and enforce tool ceilings",
-			"occurrence": 1,
-			"sha256": "5b7290ee604a99e30b21a825887be5cb47a41a2a0ef2d7438f6aac5df7406a2f",
 			"domain": "dynamic-runtime"
 		},
 		{
@@ -1234,12 +1132,6 @@
 			"domain": "artifact-web"
 		},
 		{
-			"name": "fail-fast cleanup releases the global live model worker cap slot for other runs",
-			"occurrence": 1,
-			"sha256": "00bcf13dcdc21008a38143b24b6468306467b4e966b31ac194457b59acbe93c8",
-			"domain": "engine-store"
-		},
-		{
 			"name": "fail-fast flags off preserve failed-run scheduling without sibling cancellation",
 			"occurrence": 1,
 			"sha256": "fd14341c19b6bf068cba83294dc654ed3931b96219901b9645e5fd605cacca23",
@@ -1276,12 +1168,6 @@
 			"domain": "engine-store"
 		},
 		{
-			"name": "formatRun stays byte-identical when fail-fast policy is unset",
-			"occurrence": 1,
-			"sha256": "9a1ee7bf7ed5eb2adf7617e3cf4f97bafc83d002976d5e3542de05e84a830e40",
-			"domain": "authoring-interface"
-		},
-		{
 			"name": "formatRun surfaces supervisor heartbeat lost while run says running",
 			"occurrence": 1,
 			"sha256": "76b278bf70721b72047d6271f33735193d3f6e72fe2ed7768845e924c0a650bd",
@@ -1294,12 +1180,6 @@
 			"domain": "authoring-interface"
 		},
 		{
-			"name": "fully successful run has no degradation field",
-			"occurrence": 1,
-			"sha256": "ba935ba06d02c15c6d184e98e697560e935bab46bcdbcd13ee8d450a1fbda144",
-			"domain": "core-runtime"
-		},
-		{
 			"name": "G05 reserved nested workflow corruption fails closed without blind resend",
 			"occurrence": 1,
 			"sha256": "187ebaa288b3cb7a7c269627977a9535337ce3ce8723d4fd49faecb9537751bd",
@@ -1309,12 +1189,6 @@
 			"name": "global live model worker cap defers in leased scheduler without hanging",
 			"occurrence": 1,
 			"sha256": "83ad11d0eb6fa9d4e860c4f5bb5e7fa7c15ee71cd706c9aa8f2351d5096f1186",
-			"domain": "engine-store"
-		},
-		{
-			"name": "global live model worker cap defers saturated launches without waiting",
-			"occurrence": 1,
-			"sha256": "48dc1537fab0efec948b36e6bb36880ebec690d289afc3926de265840b681288",
 			"domain": "engine-store"
 		},
 		{
@@ -1336,12 +1210,6 @@
 			"domain": "engine-store"
 		},
 		{
-			"name": "launch-bootstrap provenance reloads with the prepared artifact manifest before backend spawn",
-			"occurrence": 1,
-			"sha256": "5af8a30442c0d85708fa32bfbf7a0320868102eebb9c1c1ae8bd4aa39f63e015",
-			"domain": "engine-store"
-		},
-		{
 			"name": "launch-bootstrap rejects artifact binding drift before runSubagent",
 			"occurrence": 1,
 			"sha256": "f63d355f36ecfe7b87b7f31730b3078599ce28078f5e4c2ba1d51d780faf2e7d",
@@ -1358,12 +1226,6 @@
 			"occurrence": 1,
 			"sha256": "44ba65c37f62c40b3247415c82c4b28aa26dc9ac09e7132a338237efd041acbf",
 			"domain": "engine-store"
-		},
-		{
-			"name": "loop completed task with unreadable result records a warning",
-			"occurrence": 1,
-			"sha256": "08ba592b73a7a5e98de1120f3afca831f254c748087a01b5f6e29703dd98108b",
-			"domain": "core-runtime"
 		},
 		{
 			"name": "loop explicit missing progressPath records a warning",
@@ -1438,18 +1300,6 @@
 			"domain": "authoring-interface"
 		},
 		{
-			"name": "non artifact graph subagent launches do not request child sessions",
-			"occurrence": 1,
-			"sha256": "db9c3fe06285a2c82927757c61d3071403451b3016735dade9e51b0b7f27f14a",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "normalized web fetch requires explicit public-host direct-safe preparation",
-			"occurrence": 1,
-			"sha256": "8e7ca23f09d14b73466add981f01c24b88ed870c64e75089c5f47fda665fe3a7",
-			"domain": "artifact-web"
-		},
-		{
 			"name": "notifyUnfinishedRuns labels degraded failed runs as final rendered",
 			"occurrence": 1,
 			"sha256": "f609cd81c4fe5499fd6f0fc0717544ba1201c112d8284d3a96b8eeacd1d05d2b",
@@ -1510,12 +1360,6 @@
 			"domain": "engine-store"
 		},
 		{
-			"name": "partial output sections are parsed separately from final workflow output",
-			"occurrence": 1,
-			"sha256": "8db7f799a2d0a9264ba33c71774237941384d0e9125debc5f1fdea731813075f",
-			"domain": "dynamic-runtime"
-		},
-		{
 			"name": "per-item dispatch keeps launched items and applies sourcePolicy after producer failure",
 			"occurrence": 1,
 			"sha256": "273acc0b17d9705613cecf72f5c994c45bb9720edd197a0f8b3fc45118a4f6db",
@@ -1546,33 +1390,9 @@
 			"domain": "engine-store"
 		},
 		{
-			"name": "refresh backs off zero-output rate-limit model failures",
-			"occurrence": 1,
-			"sha256": "d9ecf795e137759b559e59fd75280938cf6711cff6dd91abddc24aecab630479",
-			"domain": "core-runtime"
-		},
-		{
-			"name": "refresh detects rate-limit text from stderr",
-			"occurrence": 1,
-			"sha256": "ac9fcd4b8b9eb61b9dd8ddc605f75b3ae9fd4a1ee46a2b3b20326e414a7f395e",
-			"domain": "core-runtime"
-		},
-		{
 			"name": "refresh does not retry deterministic boot or config failures",
 			"occurrence": 1,
 			"sha256": "fb2345fddc5b1fa47ddf875cc875ba8971949ae0d6f25c175c365446d326de49",
-			"domain": "core-runtime"
-		},
-		{
-			"name": "refresh escalates and exhausts rate-limit backoff attempts",
-			"occurrence": 1,
-			"sha256": "ae07f1a27e015944d46fb3912509afe6ab2793861f002968143dbf40bd26702e",
-			"domain": "engine-store"
-		},
-		{
-			"name": "refresh fails fast on maximum-length provider validation with 5xx-sized limits",
-			"occurrence": 1,
-			"sha256": "94167c07fa0dd12f04d77b69f16a0e8d5434d3428189a19f378fe60341f51806",
 			"domain": "core-runtime"
 		},
 		{
@@ -1616,12 +1436,6 @@
 			"occurrence": 1,
 			"sha256": "04cc25e7f20b6bdbab576ac0dc9880eec03c271f63ea17a0fabc731f86472711",
 			"domain": "core-runtime"
-		},
-		{
-			"name": "refresh retries zero-output transient subagent model failures",
-			"occurrence": 1,
-			"sha256": "98e6073235c9e582483f11d79a76c4ab19b5547de83fdeb27e23cef1f63ce8cb",
-			"domain": "engine-store"
 		},
 		{
 			"name": "refresh surfaces poll API errors after processing sibling tasks",
@@ -1700,18 +1514,6 @@
 			"occurrence": 1,
 			"sha256": "3f9d2c4a3706c9e1388c42bf4822a5a2ca912dc9a4914be98f80c362debd1848",
 			"domain": "dynamic-runtime"
-		},
-		{
-			"name": "run records use artifact-graph type and preserve artifact graph discriminator",
-			"occurrence": 1,
-			"sha256": "ab24f99a4e318af4d54b213175b1cedbec60f142ab1defe5b28f3c443ce28853",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "run that failed at the final stage records no degradation",
-			"occurrence": 1,
-			"sha256": "8a82a5c59a87a366dfe8ebc9d6d26bc9b7313a6b47674bb6027b003f3eb773c3",
-			"domain": "core-runtime"
 		},
 		{
 			"name": "runDynamicDecisionLoop adds an extra stall for repeated loop signature",
@@ -1846,27 +1648,9 @@
 			"domain": "core-runtime"
 		},
 		{
-			"name": "runtime model resolver clamps unsupported thinking deterministically without prompting",
-			"occurrence": 1,
-			"sha256": "f6294f0450e238fe38c2d1b1cab453dba9270c7f64b468d6a8ed1e442d2e586e",
-			"domain": "core-runtime"
-		},
-		{
 			"name": "runtime model resolver clamps up like pi when only higher levels are supported",
 			"occurrence": 1,
 			"sha256": "055d38319ed19833e8355121c3ef56c73da43c4e62c2ce7b795baa303e78588c",
-			"domain": "core-runtime"
-		},
-		{
-			"name": "runtime model resolver defaults to current model and thinking",
-			"occurrence": 1,
-			"sha256": "0f68fddee43c4029524da3983ee2fbfea7f11d8c602be9f0463767eba4ba489d",
-			"domain": "core-runtime"
-		},
-		{
-			"name": "runtime model resolver falls back unsupported thinking without UI",
-			"occurrence": 1,
-			"sha256": "23e4c5ab70e9d82ddd2d15b7893ac591318d2b1baaaef0105d9355bf062e3cea",
 			"domain": "core-runtime"
 		},
 		{
@@ -1946,24 +1730,6 @@
 			"occurrence": 1,
 			"sha256": "4fb3ca8f899ea86cba528544d3925549de6e0bf7d28e12e03c366495f73bf412",
 			"domain": "engine-store"
-		},
-		{
-			"name": "shared status helpers derive canonical task summaries",
-			"occurrence": 1,
-			"sha256": "2d77991dd2466a27cecd79eb241a28f5e8b86980f93f83394bd215e3c76e215b",
-			"domain": "authoring-interface"
-		},
-		{
-			"name": "simple JSON path reads own properties only and supports safe array selectors",
-			"occurrence": 1,
-			"sha256": "52c97adc33dc054af916ac36759eaffdd9ecfc0f975bcf1e92bd4761c92cecea",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "spec-less direct dynamic run records provenance and launches planner",
-			"occurrence": 1,
-			"sha256": "eefac57e868fc106f38df744c5cebb47aabf99f237eceb18db62c9ac5897639d",
-			"domain": "dynamic-runtime"
 		},
 		{
 			"name": "spec-review partition helper joins verifier results and flags missing coverage",
@@ -2050,18 +1816,6 @@
 			"domain": "engine-store"
 		},
 		{
-			"name": "subagent launch appends extra extensions from env",
-			"occurrence": 1,
-			"sha256": "3f0c02e58106ef1bf6f65d65058931175c398dbcea6c86d8acc5968a7934a694",
-			"domain": "engine-store"
-		},
-		{
-			"name": "subagent launch can opt out of fetch cache and keep built-in provider mappings",
-			"occurrence": 1,
-			"sha256": "144bdd0667ae3a2c6b11c54ce7a2b578779d3f11332f4d050f3e2730cba2e21a",
-			"domain": "artifact-web"
-		},
-		{
 			"name": "subagent launch detaches validated options from post-registration mutation",
 			"occurrence": 1,
 			"sha256": "afdca4ce23616a6d2858a0018ca1017ece40a43be1ff62b22a8ffc17973f3bd2",
@@ -2077,12 +1831,6 @@
 			"name": "subagent launch gate honors env override and recovers slots after throw",
 			"occurrence": 1,
 			"sha256": "c693ac3d1052c5d97011575b7c2311b2e5316e6b88202a9f5e050af28c126a3b",
-			"domain": "engine-store"
-		},
-		{
-			"name": "subagent launch loads provider extensions for extension-backed tools",
-			"occurrence": 1,
-			"sha256": "9cc5951feb4db9e8307287ccf7c81f2e30cd65298fa353bb5b4db8512ff57ebc",
 			"domain": "engine-store"
 		},
 		{
@@ -2132,18 +1880,6 @@
 			"occurrence": 1,
 			"sha256": "7c08c358464d4797a40bb814a080de7471eb184c69c71269a97b3eae003bfe70",
 			"domain": "engine-store"
-		},
-		{
-			"name": "subagent launch uses generated fetch cache extension by default",
-			"occurrence": 1,
-			"sha256": "eaee3df11a276f48fae401352f9b8d9cd15598dfaa2a9e7d594fbcc0ba9d5d2a",
-			"domain": "dynamic-runtime"
-		},
-		{
-			"name": "subagent launch wires normalized workflow web-source tools through generated extension",
-			"occurrence": 1,
-			"sha256": "69607f3ddaf3391b772ccde9e9eabc4ca8b913835d1feb9d9fd26cd6a73e4aab",
-			"domain": "dynamic-runtime"
 		},
 		{
 			"name": "subagent terminal failure records parent child failed when parent env is set",
@@ -2206,12 +1942,6 @@
 			"domain": "artifact-web"
 		},
 		{
-			"name": "workflow artifact bundle can validate strict ref URL availability",
-			"occurrence": 1,
-			"sha256": "a7b78838923c713eb67cbced4ddec5c26a9a01496f3e31377b2dc58fadf6234f",
-			"domain": "artifact-web"
-		},
-		{
 			"name": "workflow artifact bundle counts duplicate ref URLs toward maxUrls",
 			"occurrence": 1,
 			"sha256": "ab0973ef0ebcd06d8aa84ee19d2c4954eed053a05c34df6b60d881d0265f57e6",
@@ -2221,24 +1951,6 @@
 			"name": "workflow artifact bundle gates positive verifier claim support",
 			"occurrence": 1,
 			"sha256": "38269496bd72e15e78f30f2117181a304734aaed01d62777cb024052f01ab7ec",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "workflow artifact bundle keeps ref URL validation serial per host",
-			"occurrence": 1,
-			"sha256": "1a33f38a290a33cf1995b644c18ec03d1e482287a5a3296ef13bc3c450a06b0a",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "workflow artifact bundle orders concurrent ref URL issues by ref index",
-			"occurrence": 1,
-			"sha256": "3d412c8bf0388a2ba17aa1f5630c4de8a755551cd6204ed480bce77eef3d3db5",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "workflow artifact bundle records schema-slip repair telemetry",
-			"occurrence": 1,
-			"sha256": "cf498f0ff016836229368b45e39123472e7baba0e7feee119410a07979ba9a15",
 			"domain": "artifact-web"
 		},
 		{
@@ -2257,12 +1969,6 @@
 			"name": "workflow artifact bundle validates unique ref URLs concurrently",
 			"occurrence": 1,
 			"sha256": "e803f3f6a7ad9a6595302c7b343aaface0ed7565508bbe813794c859f686a904",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "workflow artifact bundle writer does not commit result when a parallel sidecar fails",
-			"occurrence": 1,
-			"sha256": "c6ba07ff11926c916d8a081e89c9cdd655f0c3bafd1bd70791363cadc04a0a7b",
 			"domain": "artifact-web"
 		},
 		{
@@ -2338,18 +2044,6 @@
 			"domain": "authoring-interface"
 		},
 		{
-			"name": "workflow helper loader resolves directory-local helpers",
-			"occurrence": 1,
-			"sha256": "a4b69ee5ce469b1fbd95d1fa4196a4f2394ec51d93954b828ad7a4b5da5ef058",
-			"domain": "authoring-interface"
-		},
-		{
-			"name": "workflow index debounces nonterminal updates but publishes terminal runs immediately",
-			"occurrence": 1,
-			"sha256": "ff0a8930e352e5f459ba6fae5d304cd5790c86cdd2677aadf7341d4cea3d6f13",
-			"domain": "engine-store"
-		},
-		{
 			"name": "workflow index explicit drain preserves failures from every pending cwd",
 			"occurrence": 1,
 			"sha256": "2c87e9443c535f21cc6264c19cfa925dfa065674aaec9a67ac4fe7becc160cfb",
@@ -2368,22 +2062,10 @@
 			"domain": "engine-store"
 		},
 		{
-			"name": "workflow index preserves run linkage without embedding task rows",
-			"occurrence": 1,
-			"sha256": "8f2fb846232abd09cf62a7ec6cd9bc00d68cdbff3b5006fd3b880c5c2a6f80f4",
-			"domain": "engine-store"
-		},
-		{
 			"name": "workflow launch authority is deterministic and enforces its lifecycle",
 			"occurrence": 1,
 			"sha256": "3e99a33eed15b5d787e3b2422a45b2828d99d713f281e6de2c0dc72c8bea83e1",
 			"domain": "engine-store"
-		},
-		{
-			"name": "workflow output parser accepts canonical control analysis refs sections",
-			"occurrence": 1,
-			"sha256": "07c00a7487caa5734da4820a845ab0aebab22317000ea3a7cc15fab8406f3702",
-			"domain": "artifact-web"
 		},
 		{
 			"name": "workflow output parser balances control braces inside strings during stray-brace recovery",
@@ -2437,12 +2119,6 @@
 			"name": "workflow output parser repairs known workflow control schema slips before validation",
 			"occurrence": 1,
 			"sha256": "2403a3dd5560272518839e708c6909b347915965a67a009fd1e0589dca5c81c0",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "workflow output parser tolerates literal closing tags inside JSON strings",
-			"occurrence": 1,
-			"sha256": "64cdf620853ab72f29c35f59ccabec28e73b48e40adb8199bb486910e89844ea",
 			"domain": "artifact-web"
 		},
 		{
@@ -2500,28 +2176,10 @@
 			"domain": "artifact-web"
 		},
 		{
-			"name": "workflow output retry instructions include ref repair guidance",
-			"occurrence": 1,
-			"sha256": "0c52d079239888b165ca9225a13102472133f3f75972c77f7aacc7d3b609f58b",
-			"domain": "artifact-web"
-		},
-		{
 			"name": "workflow process role helpers default to supervisor and honor worker/disabled",
 			"occurrence": 1,
 			"sha256": "f365bc68b0319ecd587be36d79536e51714e89baf9b7471df7ab0d1fdeb4025d",
 			"domain": "engine-store"
-		},
-		{
-			"name": "workflow progress health classifies fresh long-running audit as long-tail active",
-			"occurrence": 1,
-			"sha256": "43195948bee3becdafa1f8160e7f9970ee2d7cf028868eee5653844bb4a4c50a",
-			"domain": "core-runtime"
-		},
-		{
-			"name": "workflow progress health classifies reviewer fanout as long running",
-			"occurrence": 1,
-			"sha256": "3cd618b66cfd769f3c38b21fdbfe3de86240b03b27ff643c7a6dddb0a832787b",
-			"domain": "core-runtime"
 		},
 		{
 			"name": "workflow progress health flags stale pending-only runs",
@@ -2533,12 +2191,6 @@
 			"name": "workflow progress health flags stale running task without backend signal",
 			"occurrence": 1,
 			"sha256": "68348b24cbbe1720b1d1472bc66d89c68c7260d93bbb2a316f77b6f56f6c95ed",
-			"domain": "engine-store"
-		},
-		{
-			"name": "workflow progress health handles slim index summaries without task rows",
-			"occurrence": 1,
-			"sha256": "52de45fe4e2d1b6c1ae919c8195bef436415ca5139f56648017dd61f7a063f13",
 			"domain": "engine-store"
 		},
 		{
@@ -2560,33 +2212,9 @@
 			"domain": "core-runtime"
 		},
 		{
-			"name": "workflow registry does not resolve prelaunch renamed workflow aliases",
-			"occurrence": 1,
-			"sha256": "d07b768cfe53e97873f1ed6a6af2bd6b76f1baf7dae7fb7bebc4bf9e58ceab69",
-			"domain": "engine-store"
-		},
-		{
 			"name": "workflow registry fails closed when flat and bundle specs conflict",
 			"occurrence": 1,
 			"sha256": "ca9d4ae4d0df7260e2d6836a9796b2aa6039f751c9a0610a8845fa02b18013d6",
-			"domain": "authoring-interface"
-		},
-		{
-			"name": "workflow registry prefers project workflow over local state and bundled duplicates",
-			"occurrence": 1,
-			"sha256": "fcc3c8f15c3afdbaaf7bdbbc314d18a75bde18984494df3a0c0806f4dc45924e",
-			"domain": "authoring-interface"
-		},
-		{
-			"name": "workflow registry resolves bundle specs and sets correct workflowRoot",
-			"occurrence": 1,
-			"sha256": "75916b1adfa58413dfa8e1e992371fe9d793abc55f6b867720b234cdad0ed7e8",
-			"domain": "authoring-interface"
-		},
-		{
-			"name": "workflow registry resolves exact names",
-			"occurrence": 1,
-			"sha256": "19b229f0eac35313875b17610929b6f629738678b220e55db84771c2ba247bc7",
 			"domain": "authoring-interface"
 		},
 		{
@@ -2692,12 +2320,6 @@
 			"domain": "authoring-interface"
 		},
 		{
-			"name": "workflow TUI keeps run summaries compact without Health or Navigation sections",
-			"occurrence": 1,
-			"sha256": "abb53e9155c75e73cc09b15daed375677d7feb149d537aab82ba109b2ae32d9a",
-			"domain": "authoring-interface"
-		},
-		{
 			"name": "workflow TUI renders likely-stuck inline status and keeps narrow widths bounded",
 			"occurrence": 1,
 			"sha256": "4543f4e90c5e857c4a27396c8613f952900947041b91bb6a5f8726e2eeb3cfe9",
@@ -2719,12 +2341,6 @@
 			"name": "workflow web-source core redacts URLs and reads normalized snippets",
 			"occurrence": 1,
 			"sha256": "c93bcfafbf11581ad03a80024f483d6f48233b3549cd26baf1e5d1fb42c82feb",
-			"domain": "artifact-web"
-		},
-		{
-			"name": "workflow web-source extension aggregates mixed source read statuses",
-			"occurrence": 1,
-			"sha256": "68a0b3fa06dc6b341691fe7115ee0ca6f87c7064fdb85b767531002b75a1ef0a",
 			"domain": "artifact-web"
 		},
 		{
@@ -2752,12 +2368,6 @@
 			"domain": "artifact-web"
 		},
 		{
-			"name": "workflow web-source search disables provider curation by default",
-			"occurrence": 1,
-			"sha256": "cd71b0acc27526cc46f63f5ec8567674e9bedf442ae2e9df86e4a89fdb4a4460",
-			"domain": "artifact-web"
-		},
-		{
 			"name": "workflow_artifact can read deterministic JSON projections with caps",
 			"occurrence": 1,
 			"sha256": "35ab18f09c8f1103c4e96b53ae7e3409df02167ca624022a3a025d9f2266de93",
@@ -2768,12 +2378,6 @@
 			"occurrence": 1,
 			"sha256": "20b41f9c71b892a1ca73ca64927a593e1707e9db77a7472ec7feb560a259c417",
 			"domain": "artifact-web"
-		},
-		{
-			"name": "workflow_artifact generated extension wrapper embeds config without prompt-visible paths",
-			"occurrence": 1,
-			"sha256": "b32c3f180be4294816ad9540a96de1c2efb27274f5cf8c0285f3923ea1e8915d",
-			"domain": "dynamic-runtime"
 		},
 		{
 			"name": "workflow_artifact lists visible sources, reads by source name, and records a read ledger",

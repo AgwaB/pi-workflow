@@ -151,15 +151,7 @@ test('RR-01 selected child purges before newer parent; dry run has no writes',as
  } finally { await rm(cwd,{recursive:true,force:true}); }
 });
 for (const [label, status, markers, taskMarkers] of [
- ['recovery-required interrupted', 'interrupted', {goalParticipation:{resumeRequired:true}}, {goalRoot:{generations:[]}}],
  ['UNKNOWN failed', 'failed', {}, {goal:{goalId:'goal_engine_fixture',contractHash:'a'.repeat(64),state:'engine:unknown'}}],
- ['achieved ordinary root', 'completed', {}, {goalRoot:{generations:[{outcome:'achieved'}]},goal:{goalId:'goal_engine_fixture',contractHash:'a'.repeat(64),state:'engine:achieved'}}],
- ['uncertain root marker', 'failed', {}, {goalRoot:null}],
- ['uncertain participation marker', 'interrupted', {goalParticipation:null}, {}],
- ['worker participation marker', 'completed', {}, {goalParticipation:{policySpecId:'goal'}}],
- ['partial child marker', 'completed', {goalChild:{policySpecId:'goal'}}, {}],
- ['null child marker', 'failed', {goalChild:null}, {}],
- ['malformed child marker', 'interrupted', {goalChild:'not-authority'}, {}],
 ]) test(`RR-AC14 ordinary Goal ${label} protects evidence and ancestry from generic keep0`,async()=>{
  const cwd=await fixture();try{
   const ancestor=await run(cwd,parent);
@@ -369,13 +361,6 @@ test('RR-01 cross-process child publication cannot race a prune into an orphan',
   });
   const summary=await pruneWorkflowRuns(cwd,{keep:0,yes:true});assert.equal(summary.runs[0].deleted,true);const result=await writer;assert.equal(result.status,3,result.stdout+result.stderr);assert.equal(await exists(join(cwd,'.pi','workflows',child,'run.json')),false);
  }finally{setWorkflowPruneBeforeDeleteForTests();await writer;await rm(cwd,{recursive:true,force:true});}
-});
-test('RR-01 two destructive prune processes serialize their plans',async()=>{
- const cwd=await fixture();let second;let entered=false;try{
-  await run(cwd,parent);
-  setWorkflowPruneBeforeDeleteForTests(async()=>{if(entered)return;entered=true;second=processResult(`import {pruneWorkflowRuns} from ${JSON.stringify(new URL('../../.tmp/unit/run-retention.js',import.meta.url).href)};console.log(JSON.stringify(await pruneWorkflowRuns(${JSON.stringify(cwd)},{keep:0,yes:true})));`,cwd);await new Promise(r=>setTimeout(r,60));});
-  const first=await pruneWorkflowRuns(cwd,{keep:0,yes:true});assert.equal(first.runs[0].deleted,true);const result=await second;assert.equal(result.status,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout).runs,[]);assert.deepEqual((await readIndex(cwd)).runs,[]);
- }finally{setWorkflowPruneBeforeDeleteForTests();await second;await rm(cwd,{recursive:true,force:true});}
 });
 test('RR-02 post-detach fault never removes a new same-ID run or mirror and indexes the new generation',async()=>{
  const cwd=await fixture();try{

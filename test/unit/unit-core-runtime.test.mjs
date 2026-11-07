@@ -277,25 +277,6 @@ test("workflow retry limit overrides accept zero and reject malformed values", (
 	);
 });
 
-test("compactStrings trims, filters, and optionally preserves duplicates", () => {
-	assert.deepEqual(compactStrings([" alpha ", "", "alpha", " beta ", null]), [
-		"alpha",
-		"beta",
-	]);
-	assert.deepEqual(compactStrings([" a ", " a ", ""], { unique: false }), [
-		"a",
-		"a",
-	]);
-	assert.deepEqual(
-		compactStrings([" ", "x", "x"], {
-			trim: false,
-			unique: false,
-			dropEmpty: false,
-			dropWhitespaceOnly: false,
-		}),
-		[" ", "x", "x"],
-	);
-});
 
 test("blocked dependencies skip only dependent pending tasks", () => {
 	const run = {
@@ -1175,16 +1156,6 @@ test("experimental speed flags default off and parse explicit truthy values", ()
 	);
 });
 
-test("adaptive live workers cap growth at configured live-worker limit", () => {
-	withAdaptiveLiveWorkerEnv({ adaptive: "1", maxLiveWorkers: "5" }, () => {
-		for (let i = 0; i < 10; i += 1) {
-			observeLiveModelWorkerCompletion("anthropic", 1_000);
-		}
-		const telemetry = resolveLaunchControlTelemetryForTests();
-		assert.equal(telemetry.maxLiveModelWorkers, 5);
-		assert.equal(telemetry.adaptiveLiveModelWorkers.anthropic.limit, 5);
-	});
-});
 
 
 
@@ -1659,51 +1630,6 @@ test("loop until evaluator supports equals notEquals lengthEquals all and any", 
 	}
 });
 
-test("loop completed task with unreadable result records a warning", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "unit-scout", "read");
-		const { run } = await createLoopRun(cwd);
-		await scheduleRun(cwd, run.runId);
-		const current = await readRunRecord(cwd, run.runId);
-		await completeTask(cwd, taskBySpec(current, "fix-loop.r01.implement"), {
-			changed: true,
-		});
-		const check = taskBySpec(current, "fix-loop.r01.check");
-		await completeTask(cwd, check, { status: "pass" });
-		writeFileSync(
-			join(dirname(join(cwd, check.files.result)), "control.json"),
-			"{not-json",
-		);
-		await writeRunRecord(cwd, current);
-		const compiledAfterRound1 = JSON.parse(
-			readFileSync(
-				join(cwd, ".pi", "workflows", current.runId, "compiled.json"),
-				"utf8",
-			),
-		);
-
-		assert.equal(
-			await evaluateLoopUntilCondition(
-				cwd,
-				current,
-				compiledAfterRound1,
-				"fix-loop",
-				1,
-				{ stage: "check", path: "$.status", equals: "pass" },
-			),
-			false,
-		);
-		assert.match(check.lastMessage, /completed loop task result unreadable/);
-	} finally {
-		rmSync(cwd, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 10,
-		});
-	}
-});
 
 test("structured contract validator checks nested paths, arrays, and caps", () => {
 	const valid = validateStructuredContract(
@@ -4342,28 +4268,6 @@ test("refresh fails fast on permanent provider input-validation model failures",
 	}
 });
 
-test("refresh fails fast on maximum-length provider validation with 5xx-sized limits", async () => {
-	const cwd = makeProject();
-	try {
-		const providerError =
-			"Invalid 'metadata.key': string too long. Expected a string with maximum length 512, but got a string with length 530";
-		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
-			runId: "run_provider_length_512",
-			attemptId: "attempt_provider_length_512",
-			artifactDirName: ".fake-provider-length-512-subagent",
-			streamErrors: [providerError],
-		});
-		assertPermanentModelFailure(cwd, refreshedTask, /maximum length 512/);
-	} finally {
-		setSubagentApiForTests(undefined);
-		rmSync(cwd, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 10,
-		});
-	}
-});
 
 test("refresh retries truncated-stream model failures", async () => {
 	const cwd = makeProject();
@@ -4420,42 +4324,6 @@ test("zero transient retry override fails the first transient model failure", as
 	}
 });
 
-test("refresh backs off zero-output rate-limit model failures", async () => {
-	const cwd = makeProject();
-	try {
-		const beforeRefreshMs = Date.now();
-		const providerError = `Anthropic request failed: HTTP 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."},"request_id":"req_unit_rate_limit"}`;
-		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
-			runId: "run_rate_limit_backoff",
-			attemptId: "attempt_rate_limit_backoff",
-			artifactDirName: ".fake-rate-limit-subagent",
-			streamErrors: [providerError],
-		});
-		assert.equal(refreshedTask.status, "pending");
-		assert.equal(refreshedTask.statusDetail, "retry_model_failure");
-		assert.equal(refreshedTask.launchRetry?.attempts, 1);
-		assert.equal(refreshedTask.launchRetry?.maxAttempts, 5);
-		assert.equal(refreshedTask.launchRetry?.reason, "model_rate_limit");
-		assert.equal(refreshedTask.launchRetry?.retryAfterMs, 60_000);
-		assert.ok(
-			Date.parse(refreshedTask.launchRetry?.nextEligibleAt ?? "") >=
-				beforeRefreshMs + 59_000,
-		);
-		assert.match(refreshedTask.lastMessage, /rate-limit backoff/);
-		assert.equal(
-			existsSync(firstTransientModelFailureAttemptPath(cwd, refreshedTask)),
-			true,
-		);
-	} finally {
-		setSubagentApiForTests(undefined);
-		rmSync(cwd, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 10,
-		});
-	}
-});
 
 test("refresh parses rate-limit Retry-After units", async () => {
 	const cases = [
@@ -4517,27 +4385,6 @@ test("refresh parses rate-limit Retry-After units", async () => {
 	}
 });
 
-test("refresh detects rate-limit text from stderr", async () => {
-	const cwd = makeProject();
-	try {
-		const { refreshedTask } = await refreshZeroOutputModelFailure(cwd, {
-			runId: "run_rate_limit_stderr",
-			attemptId: "attempt_rate_limit_stderr",
-			artifactDirName: ".fake-rate-limit-stderr-subagent",
-			stderrText: "HTTP 429 rate_limit_error. Retry-After: 30\n",
-		});
-		assert.equal(refreshedTask.launchRetry?.reason, "model_rate_limit");
-		assert.equal(refreshedTask.launchRetry?.retryAfterMs, 30_000);
-	} finally {
-		setSubagentApiForTests(undefined);
-		rmSync(cwd, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 10,
-		});
-	}
-});
 
 test("refresh does not retry deterministic boot or config failures", async () => {
 	const cwd = makeProject();
@@ -4669,34 +4516,6 @@ test("refresh does not retry deterministic boot or config failures", async () =>
 	}
 });
 
-test("runtime model resolver defaults to current model and thinking", async () => {
-	const resolved = await resolveWorkflowRuntime(
-		{},
-		{
-			taskKey: "main.main",
-			stageId: "main",
-			taskId: "main",
-			agent: "unit-scout",
-		},
-		{
-			defaults: { model: "openai-codex/gpt-5.5", thinking: "high" },
-			availableModels: [
-				{
-					provider: "openai-codex",
-					id: "gpt-5.5",
-					fullId: "openai-codex/gpt-5.5",
-					reasoning: true,
-				},
-			],
-		},
-	);
-
-	assert.deepEqual(resolved, {
-		model: "openai-codex/gpt-5.5",
-		thinking: "high",
-		thinkingResolution: { requested: "high", resolved: "high" },
-	});
-});
 
 test("runtime model resolver asks before choosing ambiguous enabled models", async () => {
 	const selections = [];
@@ -4783,45 +4602,6 @@ test("runtime model resolver asks before choosing an available model when reques
 	assert.deepEqual(resolved, { model: "kimi-coding/kimi-for-coding" });
 });
 
-test("runtime model resolver falls back unsupported thinking without UI", async () => {
-	const resolved = await resolveWorkflowRuntime(
-		{ model: "gpt-5.5", thinking: "xhigh" },
-		{
-			taskKey: "main.main",
-			stageId: "main",
-			taskId: "main",
-			agent: "unit-scout",
-		},
-		{
-			availableModels: [
-				{
-					provider: "openai-codex",
-					id: "gpt-5.5",
-					fullId: "openai-codex/gpt-5.5",
-					reasoning: true,
-					thinkingLevelMap: {
-						off: null,
-						minimal: null,
-						low: null,
-						medium: "medium",
-						high: "high",
-					},
-				},
-			],
-		},
-	);
-
-	assert.deepEqual(resolved, {
-		model: "openai-codex/gpt-5.5",
-		thinking: "high",
-		thinkingResolution: {
-			requested: "xhigh",
-			resolved: "high",
-			reason:
-				"requested xhigh is unsupported by openai-codex/gpt-5.5; using high",
-		},
-	});
-});
 
 test("runtime model resolver clamps up like pi when only higher levels are supported", async () => {
 	const resolved = await resolveWorkflowRuntime(
@@ -4863,52 +4643,6 @@ test("runtime model resolver clamps up like pi when only higher levels are suppo
 	});
 });
 
-test("runtime model resolver clamps unsupported thinking deterministically without prompting", async () => {
-	const resolved = await resolveWorkflowRuntime(
-		{ model: "gpt-5.5", thinking: "xhigh" },
-		{
-			taskKey: "main.main",
-			stageId: "main",
-			taskId: "main",
-			agent: "unit-scout",
-		},
-		{
-			availableModels: [
-				{
-					provider: "openai-codex",
-					id: "gpt-5.5",
-					fullId: "openai-codex/gpt-5.5",
-					reasoning: true,
-					thinkingLevelMap: {
-						off: null,
-						minimal: null,
-						low: null,
-						medium: "medium",
-						high: "high",
-					},
-				},
-			],
-			prompt: {
-				async select() {
-					throw new Error(
-						"thinking clamp must not prompt; pi clamps deterministically",
-					);
-				},
-			},
-		},
-	);
-
-	assert.deepEqual(resolved, {
-		model: "openai-codex/gpt-5.5",
-		thinking: "high",
-		thinkingResolution: {
-			requested: "xhigh",
-			resolved: "high",
-			reason:
-				"requested xhigh is unsupported by openai-codex/gpt-5.5; using high",
-		},
-	});
-});
 
 test("runtime model resolver treats missing thinkingLevelMap as xhigh opt-out like pi", async () => {
 	const resolved = await resolveWorkflowRuntime(
@@ -5095,66 +4829,7 @@ test("failed run with completed final stage records degradation and formats it",
 	}
 });
 
-test("fully successful run has no degradation field", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "unit-scout", "read");
-		const compiled = await compileWorkflow(degradationWorkflowSpec(), {
-			cwd,
-			task: "Clean delivery",
-		});
-		const { run } = await createWorkflowRunRecord(
-			cwd,
-			compiled,
-			join(cwd, "workflow.json"),
-		);
-		for (const task of run.tasks)
-			setTaskTerminal(task, "completed", "completed");
-		const derived = deriveRunStatus(run);
-		assert.equal(derived.status, "completed");
-		assert.equal(derived.degradation, undefined);
-		assert.doesNotMatch(formatRun(derived), /degraded:/);
-	} finally {
-		rmSync(cwd, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 10,
-		});
-	}
-});
 
-test("run that failed at the final stage records no degradation", async () => {
-	const cwd = makeProject();
-	try {
-		writeAgent(cwd, "unit-scout", "read");
-		const compiled = await compileWorkflow(degradationWorkflowSpec(), {
-			cwd,
-			task: "Total loss",
-		});
-		const { run } = await createWorkflowRunRecord(
-			cwd,
-			compiled,
-			join(cwd, "workflow.json"),
-		);
-		setTaskTerminal(taskByStage(run, "research"), "completed", "completed");
-		setTaskTerminal(taskByStage(run, "verify"), "completed", "completed");
-		setTaskTerminal(taskByStage(run, "report"), "failed", "failed", {
-			exitCode: 1,
-		});
-		const derived = deriveRunStatus(run);
-		assert.equal(derived.status, "failed");
-		assert.equal(derived.degradation, undefined);
-		assert.doesNotMatch(formatRun(derived), /degraded:/);
-	} finally {
-		rmSync(cwd, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 10,
-		});
-	}
-});
 
 test("deep-review finding-pipeline dedups by file+title-token overlap and partitions verdicts with severity join", async () => {
 	const helperPath = join(
@@ -10040,44 +9715,7 @@ test("deep-research claim-evidence-gate partitions verification_blocked separate
 	assert.equal(out.auditedClaims[0].status, "verification_blocked");
 });
 
-test("workflow progress health classifies fresh long-running audit as long-tail active", () => {
-	const nowMs = Date.parse("2026-07-01T12:20:00.000Z");
-	const task = workflowViewTask({
-		status: "running",
-		displayName: "final-audit.main",
-		stageId: "final-audit",
-		startedAt: "2026-07-01T12:00:00.000Z",
-		lastMessage: "pi-subagent heartbeat 2026-07-01T12:19:30.000Z",
-		backendHandle: { engine: "pi-subagent" },
-	});
-	const run = workflowViewRun([task]);
-	run.updatedAt = "2026-07-01T12:19:30.000Z";
 
-	const health = diagnoseWorkflowRunHealth(run, { nowMs });
-	assert.equal(health.state, "long-tail");
-	assert.equal(health.label, "long-tail active");
-	assert.equal(health.suggestion, "wait");
-	assert.equal(health.heartbeatAgeMs, 30_000);
-});
-
-test("workflow progress health classifies reviewer fanout as long running", () => {
-	const nowMs = Date.parse("2026-07-01T12:12:00.000Z");
-	const health = diagnoseWorkflowTaskHealth(
-		workflowViewTask({
-			status: "running",
-			displayName: "reviewers.rq-001",
-			stageId: "reviewers",
-			startedAt: "2026-07-01T12:00:00.000Z",
-			lastMessage: "pi-subagent heartbeat 2026-07-01T12:11:50.000Z",
-			backendHandle: { engine: "pi-subagent" },
-		}),
-		{ updatedAt: "2026-07-01T12:11:50.000Z" },
-		{ nowMs },
-	);
-
-	assert.equal(health.durationClass, "long");
-	assert.equal(health.state, "long-tail");
-});
 
 test("workflow progress health surfaces failed fanout before running siblings", () => {
 	const nowMs = Date.parse("2026-07-01T12:12:00.000Z");

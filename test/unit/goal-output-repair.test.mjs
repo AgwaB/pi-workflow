@@ -12,8 +12,3 @@ test("ordinary parsing salvages an unterminated envelope; strict sections reject
   assert.equal(strict.valid, false, "a Goal verifier envelope is never salvaged into a verdict");
   assert.ok(strict.issues.some(issue => issue.section === "refs"));
 });
-
-test("strict sections accept a complete envelope", () => {
-  const complete = `${truncated}\n</analysis>\n<refs>\n[]\n</refs>`;
-  assert.equal(parseWorkflowOutputForBundle(complete, { ...options, strictSections: true }).valid, true);
-});

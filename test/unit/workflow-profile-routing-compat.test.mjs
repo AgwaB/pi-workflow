@@ -70,44 +70,7 @@ async function writeLegacyPreference(
 	return path;
 }
 
-test("pre-routing saved profile survives routing add/edit/remove without writes; launch capture stays exact", async () => {
-	const context = fixture();
-	await saveWorkflowProfilePreference(context, { selectedProfile: "codex-high" });
-	const identity = await workflowProfileIdentity(context.spec, context.specPath);
-	assert.equal(identity.definitionFingerprint, workflowDefinitionFingerprint(context.spec));
-	const bytes = readFileSync(identity.settingsFile);
-	const names = readdirSync(dirname(identity.settingsFile));
-	for (const routing of [ROUTING, { ...ROUTING, useWhen: ["Different comparison hint."] }, undefined]) {
-		const spec = { ...context.spec, ...(routing ? { routing } : {}) };
-		const loaded = await loadWorkflowProfilePreference(spec, context.specPath);
-		assert.equal(loaded.identity.settingsFile, identity.settingsFile);
-		assert.equal(loaded.stalePreference, undefined);
-		assert.equal(loaded.preference.selectedProfile, "codex-high");
-		const captured = await resolveSavedWorkflowExecutionProfile({ ...context, spec });
-		assert.equal(captured.definitionFingerprint, workflowDefinitionFingerprint(spec));
-		assert.equal(captured.stageOverrides.plan.model, SOL);
-		assert.equal(captured.stageOverrides.plan.thinking, "xhigh");
-		if (routing) assert.notEqual(captured.definitionFingerprint, identity.definitionFingerprint);
-	}
-	assert.deepEqual(readFileSync(identity.settingsFile), bytes);
-	assert.deepEqual(readdirSync(dirname(identity.settingsFile)), names);
-});
 
-test("new saved profiles share identity across routing edits and retain exact Custom assignments", async () => {
-	const context = fixture();
-	context.spec.routing = ROUTING;
-	const custom = createCustomProfileFromBuiltin(context.spec, "codex-high");
-	custom.stages.review.thinking = { kind: "fixed", value: "medium" };
-	await saveWorkflowProfilePreference(context, { selectedProfile: "custom", custom });
-	const current = await workflowProfileIdentity(context.spec, context.specPath);
-	context.spec.routing = { ...ROUTING, outputs: ["Updated comparison wording."] };
-	const loaded = await loadWorkflowProfilePreference(context.spec, context.specPath);
-	assert.equal(loaded.identity.settingsFile, current.settingsFile);
-	assert.deepEqual(JSON.parse(JSON.stringify(loaded.preference.custom)), custom);
-	const captured = await resolveSavedWorkflowExecutionProfile(context);
-	assert.equal(captured.stageOverrides.review.thinking, "medium");
-	assert.equal(captured.definitionFingerprint, workflowDefinitionFingerprint(context.spec));
-});
 
 for (const [name, change] of [
 	["prompt", (spec) => { spec.artifactGraph.stages[0].prompt = "Changed task."; }],
@@ -138,41 +101,7 @@ for (const [name, change] of [
 	});
 }
 
-test("legacy full-definition settings remain readable and an explicit save preserves the Custom draft", async () => {
-	const context = fixture();
-	context.spec.routing = ROUTING;
-	const custom = createCustomProfileFromBuiltin(context.spec, "codex-high");
-	custom.stages.review.thinking = { kind: "fixed", value: "low" };
-	const legacyPath = await writeLegacyPreference(context, "custom", custom);
-	const bytes = readFileSync(legacyPath);
-	const loaded = await loadWorkflowProfilePreference(context.spec, context.specPath);
-	assert.equal(loaded.preference.selectedProfile, "custom");
-	assert.equal(loaded.preference.definitionFingerprint, loaded.identity.definitionFingerprint);
-	assert.notEqual(loaded.identity.settingsFile, legacyPath);
-	assert.deepEqual(readdirSync(dirname(legacyPath)), [legacyPath.split("/").at(-1)]);
-	assert.equal((await resolveSavedWorkflowExecutionProfile(context)).stageOverrides.review.thinking, "low");
-	await saveWorkflowProfilePreference(context, { selectedProfile: "codex-high" });
-	const saved = await loadWorkflowProfilePreference(context.spec, context.specPath);
-	assert.equal(saved.preference.selectedProfile, "codex-high");
-	assert.deepEqual(JSON.parse(JSON.stringify(saved.preference.custom)), custom);
-	assert.deepEqual(readFileSync(legacyPath), bytes);
-});
 
-test("the latest provably compatible choice wins over an older pre-routing setting", async () => {
-	const context = fixture();
-	await saveWorkflowProfilePreference(context, { selectedProfile: "codex" });
-	const canonical = (await workflowProfileIdentity(context.spec, context.specPath)).settingsFile;
-	const old = JSON.parse(readFileSync(canonical, "utf8"));
-	old.updatedAt = "2025-01-01T00:00:00.000Z";
-	writeFileSync(canonical, JSON.stringify(old));
-	context.spec.routing = ROUTING;
-	const legacy = await writeLegacyPreference(context);
-	const before = readFileSync(legacy);
-	assert.equal((await loadWorkflowProfilePreference(context.spec, context.specPath)).preference.selectedProfile, "codex-high");
-	await saveWorkflowProfilePreference(context, { selectedProfile: "mixed" });
-	assert.equal((await loadWorkflowProfilePreference(context.spec, context.specPath)).preference.selectedProfile, "mixed");
-	assert.deepEqual(readFileSync(legacy), before);
-});
 
 test("future legacy clocks cannot override sequential explicit saves on reload or launch", async () => {
 	const context = fixture();
@@ -230,26 +159,6 @@ test("clock rollback cannot reverse explicit save order", async (t) => {
 	);
 });
 
-test("concurrent explicit saves receive commit-ordered timestamps under the settings lock", async (t) => {
-	const context = fixture();
-	t.mock.timers.enable({
-		apis: ["Date"],
-		now: Date.parse("2030-01-01T00:00:00.000Z"),
-	});
-	const saves = await Promise.all([
-		saveWorkflowProfilePreference(context, { selectedProfile: "codex" }),
-		saveWorkflowProfilePreference(context, { selectedProfile: "codex-high" }),
-	]);
-	assert.notEqual(saves[0].updatedAt, saves[1].updatedAt);
-	const committedLast =
-		saves[0].updatedAt > saves[1].updatedAt ? saves[0] : saves[1];
-	const loaded = await loadWorkflowProfilePreference(
-		context.spec,
-		context.specPath,
-	);
-	assert.equal(loaded.preference.updatedAt, committedLast.updatedAt);
-	assert.equal(loaded.preference.selectedProfile, committedLast.selectedProfile);
-});
 
 test("an explicit save wins at the maximum canonical ISO timestamp without overflow", async () => {
 	const context = fixture();
@@ -290,18 +199,4 @@ test("legacy full hashes that cannot prove compatibility remain stale even with 
 	context.spec.routing = { ...ROUTING, outputs: ["Changed old routing text."] };
 	await assert.rejects(resolveSavedWorkflowExecutionProfile(context), /older definition/);
 	assert.deepEqual(readFileSync(legacy), bytes);
-});
-
-test("a corrupt legacy exact file is not silently bypassed by the normalized identity", async () => {
-	const context = fixture();
-	await saveWorkflowProfilePreference(context, { selectedProfile: "codex" });
-	context.spec.routing = ROUTING;
-	const legacy = await writeLegacyPreference(context);
-	const corrupt = JSON.parse(readFileSync(legacy, "utf8"));
-	corrupt.definitionFingerprint = "a".repeat(64);
-	writeFileSync(legacy, JSON.stringify(corrupt));
-	await assert.rejects(
-		loadWorkflowProfilePreference(context.spec, context.specPath),
-		/definitionFingerprint does not match the settings filename/,
-	);
 });

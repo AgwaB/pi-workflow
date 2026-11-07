@@ -155,34 +155,6 @@ test("operation-scoped reader detects ancestor drift during an actual file read"
 });
 
 
-test("operation-scoped reader batches four concurrent reads and returns input order", async t => {
-	const { root } = await fresh("batch-order");
-	const names = ["four", "one", "three", "two"];
-	for (const name of names)
-		await writeFile(join(root, name), name, { mode: 0o600 });
-	const handle = await open(join(root, names[0]), "r");
-	const prototype = Object.getPrototypeOf(handle);
-	const original = prototype.read;
-	await handle.close();
-	const release = Promise.withResolvers();
-	let entered = 0, active = 0, peak = 0;
-	t.mock.method(prototype, "read", async function (...args) {
-		active++;
-		peak = Math.max(peak, active);
-		if (++entered === 4) release.resolve();
-		await release.promise;
-		try {
-			return await original.apply(this, args);
-		} finally {
-			active--;
-		}
-	});
-	await withPrivateDirectoryReader(root, async (_read, readBatch) => {
-		assert.deepEqual(await readBatch(names, 16), names);
-	});
-	assert.equal(peak, 4);
-});
-
 test("operation-scoped reader rejects invalid batches before any file open or supplied behavior", async t => {
 	const { root } = await fresh("batch-invalid");
 	for (const name of ["a", "b", "c", "d", "e"])

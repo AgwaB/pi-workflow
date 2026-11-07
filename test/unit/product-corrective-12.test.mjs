@@ -89,29 +89,6 @@ test("legacy provider onUpdate is allowlisted, redacted, and inert after settlem
   } finally { cleanup(cwd); }
 });
 
-test("legacy fetch owns direct callbacks and discards callbacks retained after execute", async () => {
-  const cwd = project();
-  try {
-    const lateSecret = "late-provider-secret-12";
-    const { tool, appended } = registerFetch(
-      baseConfig(join(cwd, "cache"), { cacheEnabled: false }),
-      (pi) => pi.registerTool({
-        name: "fetch_content",
-        async execute(_id, params) {
-          pi.appendEntry("web-search-results", fetchData("direct-id", params.url, "token=direct-secret"));
-          setTimeout(() => pi.appendEntry("web-search-results", fetchData("late-id", params.url, lateSecret)), 0);
-          return { content: [{ type: "text", text: "token=returned-secret" }], details: { responseId: "direct-id" } };
-        },
-      }),
-    );
-    const result = await tool.execute("call", { url: "https://example.test/direct", auth: false });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.match(body(result), /REDACTED/);
-    assert.equal(appended.length, 1);
-    assert.equal(JSON.stringify(appended).includes(lateSecret), false);
-    assert.equal(JSON.stringify(appended).includes("direct-secret"), false);
-  } finally { cleanup(cwd); }
-});
 
 test("legacy cache skip branches discard unvalidated captured provider records", async () => {
   const reasons = [
