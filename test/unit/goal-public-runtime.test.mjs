@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { randomBytes } from "node:crypto";
@@ -28,6 +28,15 @@ import {
 import { tmpdir, loadavg as osLoadAverage, availableParallelism as osCpuCount } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { goalCommandSandboxAvailable } from "../../.tmp/unit/goal-command-verifier.js";
+
+// The Goal runtime unrefs its background timers (stop polling, channel
+// retirement) so they never keep a Pi host alive. A real host stays alive while
+// a Goal runs; without this, Node 22's test runner cancels a test whose pending
+// work waits only on those timers ("event loop has already resolved"). Node 24
+// already keeps the loop alive. Test deadlines still bound every scenario.
+const hostAlive = setInterval(() => {}, 2 ** 30);
+after(() => clearInterval(hostAlive));
 
 /** The SDK's own agent-core instance: nested under pi-coding-agent in older
  * installs, hoisted beside it in current ones. */
@@ -7664,6 +7673,15 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     assert.deepEqual(await Promise.all(["goal.json", "child.json"].map(name => readFile(join(cwd, name)))), immutableCatalogBytes);
     return;
   }
+  // Command criteria need the macOS sandbox. Elsewhere (Linux CI) the Goal is
+  // refused before consent and nothing runs; the macOS-only scenario stops here.
+  if (commandOracle && !goalCommandSandboxAvailable()) {
+    await assert.rejects(runWorkflowSpec(join(cwd, "goal.json"), cwd, { goalPolicyHost: host, executionProfile: "captured",
+      ...(recoveryMode ? { goalRecovery: recoveryPlan } : {}) }),
+      /Goal command verifier requires the macOS sandbox \(sandbox-exec\); not available on this host/);
+    assert.equal(confirmations, 0); assert.equal(calls.length, 0); assert.equal(budgetPhysicalRequests, 0);
+    return;
+  }
   if (recoveryMode === "generations-used") {
     await assert.rejects(runWorkflowSpec(join(cwd, "goal.json"), cwd, { goalPolicyHost: host, executionProfile: "captured",
       goalRecovery: recoveryPlan }), /Goal attempt limit 1 \(limits\.generations\) is already used by run workflow_mvzolder_000000 \(1 attempt\); nothing remains to recover with\. For more attempts, raise limits\.generations/);
@@ -11469,6 +11487,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     let inspecting = false;
     let inspectAgain = false;
     let settled = false;
+    let partialRead;
     const finish = (error, observed) => {
       if (settled) return;
       settled = true;
@@ -11490,7 +11509,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
           if (["completed", "failed", "interrupted", "blocked"].includes(observed.status))
             finish(undefined, observed);
         } while (inspectAgain && !settled);
-      } catch (error) { finish(error); }
+      } catch (error) {
+        // A fixture may rewrite run.json in place (tamper scenarios); a poll can
+        // read it half-written. Read again later within the same deadline.
+        if (error instanceof SyntaxError) partialRead = error; else finish(error);
+      }
       finally { inspecting = false; }
     };
     watcher = watch(join(cwd, ".pi", "workflows", originalRunId), () => { void inspect(); });
@@ -11499,7 +11522,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     // 18 s); a coalesced periodic re-read keeps the same deadline and contract.
     poll = setInterval(() => { void inspect(); }, 100);
     t.signal.addEventListener("abort", abort, { once: true });
-    timer = setTimeout(() => finish(new Error(`original durable run did not terminate within ${testMs(20_000)}ms: ${originalRunId}`)),
+    timer = setTimeout(() => finish(new Error(`original durable run did not terminate within ${testMs(20_000)}ms: ${originalRunId}` +
+      (partialRead ? `; last unreadable run record: ${partialRead.message}` : ""))),
       Math.max(0, deadline - Date.now()));
     if (t.signal.aborted) abort(); else void inspect();
     });
@@ -11516,6 +11540,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       let settled = false;
       let observedRun;
       let notice;
+      let partialRead;
       const finish = (error) => {
         if (settled) return;
         settled = true;
@@ -11530,7 +11555,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       const armNoticeDeadline = () => {
         if (timer) return;
         timer = setTimeout(() => finish(new Error(
-          `original run terminal/feedback did not both arrive within ${testMs(20_000)}ms: ${originalRunId}`)),
+          `original run terminal/feedback did not both arrive within ${testMs(20_000)}ms: ${originalRunId}` +
+          (partialRead ? `; last unreadable run record: ${partialRead.message}` : ""))),
         Math.max(0, (deadline ?? Date.now() + testMs(20_000)) - Date.now()));
       };
       const inspect = async () => {
@@ -11548,7 +11574,10 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
             }
             if (observedRun && notice) finish();
           } while (inspectAgain && !observedRun && !settled);
-        } catch (error) { finish(error); }
+        } catch (error) {
+          // Same half-written read tolerance as watchOriginalDurableTerminal.
+          if (error instanceof SyntaxError) partialRead = error; else finish(error);
+        }
         finally { inspecting = false; }
       };
       watcher = watch(join(cwd, ".pi", "workflows", originalRunId), () => { void inspect(); });
@@ -19541,7 +19570,10 @@ test("normal engine Goal consumes real support artifacts after consent and cance
             queued = false;
             const record = await readRunRecord(cwd, connected.runId);
             if (!record.tasks.some(task => ["pending", "running"].includes(task.status))) terminal.resolve(record);
-          }).catch(terminal.reject);
+          }).catch(error => {
+            // ack-swap rewrites run.json in place; a half-written read is retried.
+            if (!(error instanceof SyntaxError)) terminal.reject(error);
+          });
         };
         observer = watch(join(cwd, ".pi", "workflows", connected.runId), inspect);
         // Directory events can be lost (an all-terminal run.json went unobserved
