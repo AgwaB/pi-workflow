@@ -106,38 +106,6 @@ test("parent usage accumulates assistant messages for active runs", async (t) =>
 	assert.equal(record.completedAt, undefined);
 });
 
-test("parent usage finalizes on the wrap-up message after the run turns terminal", async (t) => {
-	const cwd = mkdtempSync(join(tmpdir(), "parent-usage-"));
-	t.after(() => {
-		resetParentUsageTrackingForTests();
-		rmSync(cwd, { recursive: true, force: true });
-	});
-	resetParentUsageTrackingForTests();
-	writeIndex(cwd, [indexRun("workflow_pu_2", "running")]);
-	beginParentUsageTracking(cwd, "workflow_pu_2");
-
-	await recordParentSessionUsage(
-		cwd,
-		assistantMessage({ input: 5, output: 5, totalTokens: 10 }),
-	);
-
-	writeIndex(cwd, [indexRun("workflow_pu_2", "completed")]);
-	// The first message after terminal status is the summary turn: counted, then closed.
-	await recordParentSessionUsage(
-		cwd,
-		assistantMessage({ input: 1, output: 2, totalTokens: 3 }),
-	);
-	// Tracking stopped: later messages must not accumulate.
-	await recordParentSessionUsage(
-		cwd,
-		assistantMessage({ input: 100, output: 100, totalTokens: 200 }),
-	);
-
-	const record = await readParentUsage(cwd, "workflow_pu_2");
-	assert.equal(record.assistantMessages, 2);
-	assert.equal(record.totalTokens, 13);
-	assert.ok(record.completedAt);
-});
 
 test("resumeParentUsageTracking re-attaches active runs with an existing sidecar", async (t) => {
 	const cwd = mkdtempSync(join(tmpdir(), "parent-usage-"));

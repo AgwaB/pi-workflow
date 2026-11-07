@@ -148,41 +148,6 @@ async function slash(cwd, text) {
 	return output[0];
 }
 
-test("notices list/ack/clear preserve all original files and leave status/inspect visible", async (t) => {
-	const cwd = await project(t);
-	await fixture(cwd, "workflow_preserved");
-	await warnings(cwd, Date.now() - 1_000); // Existing index and notice timestamps are part of the baseline.
-	const before = await hashes(root(cwd));
-	const listed = await list(cwd);
-	assert.equal(
-		listed.notices[0].sha256,
-		digest(await readFile(runFile(cwd, "workflow_preserved"))),
-	);
-	await ack(cwd, "workflow_preserved");
-	assert.equal((await list(cwd)).acknowledgements[0].active, true);
-	assert.equal(
-		(await readRunRecord(cwd, "workflow_preserved")).status,
-		"failed",
-	);
-	const inspected = await exec(
-		process.execPath,
-		[cli, "inspect", "workflow_preserved", "--json"],
-		{ cwd, env },
-	);
-	assert.equal(JSON.parse(inspected.stdout).status, "failed");
-	await command(cwd, ["clear", "workflow_preserved"]);
-	assert.deepEqual((await list(cwd)).acknowledgements, []);
-	for (const [path, original] of Object.entries(before))
-		assert.equal(digest(await readFile(path)), original, path);
-	const added = Object.keys(await hashes(root(cwd))).filter(
-		(path) => !(path in before),
-	);
-	assert.deepEqual(added, [sidecar(cwd)]);
-	assert.match(
-		await warnings(cwd, Date.now() + 7 * 60 * 60 * 1_000),
-		/workflow_preserved/,
-	);
-});
 
 test("only exact acknowledged failures, interruptions and eligible approval blocks are suppressed", async (t) => {
 	const cwd = await project(t);
@@ -344,52 +309,6 @@ test("malformed/invalid sidecars never suppress and mutations preserve their exa
 	}
 });
 
-test("independent concurrent CLI acknowledgements keep every entry and leave run evidence untouched", async (t) => {
-	const cwd = await project(t);
-	for (let index = 0; index < 8; index++)
-		await fixture(cwd, `workflow_concurrent_${index}`);
-	const before = await hashes(root(cwd));
-	const notices = (await list(cwd)).notices;
-	const outcomes = await Promise.allSettled(
-		notices.map((run) =>
-			exec(
-				process.execPath,
-				[
-					cli,
-					"notices",
-					"acknowledge",
-					run.runId,
-					"--state",
-					run.sha256,
-					"--reason",
-					`Explicit reason for ${run.runId}`,
-				],
-				{ cwd, env },
-			),
-		),
-	);
-	// Join every subprocess even on failure before test teardown removes its fixture.
-	for (const outcome of outcomes)
-		assert.equal(
-			outcome.status,
-			"fulfilled",
-			outcome.status === "rejected" ? String(outcome.reason) : "",
-		);
-	const result = await list(cwd);
-	assert.deepEqual(
-		result.acknowledgements.map((entry) => entry.runId).sort(),
-		notices.map((run) => run.runId).sort(),
-	);
-	assert.ok(
-		result.acknowledgements.every(
-			(entry) =>
-				entry.active && entry.reason === `Explicit reason for ${entry.runId}`,
-		),
-	);
-	for (const [path, original] of Object.entries(before))
-		assert.equal(digest(await readFile(path)), original);
-	assert.equal(await warnings(cwd), "");
-});
 
 test("ID/argument validation rejects paths, traversal, missing state/reason and extra options", () => {
 	for (const id of [

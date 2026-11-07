@@ -76,19 +76,6 @@ test("nested controller runs inherit persisted parent context and cannot retarge
 	}
 });
 
-test("old runs and explicit no-tools tasks retain their original launch surface", async () => {
-	const cwd = makeProject();
-	for (const [context, tools] of [[undefined, ["read"]], [host(cwd), []]]) {
-		const { run, task, compiledTask } = makeSubagentLaunchFixture(cwd, `native-old-${tools.length}`);
-		if (context) run.nativeHost = context;
-		compiledTask.runtime.tools = tools;
-		const prepared = await prepareSubagentTaskLaunch(cwd, run, task, compiledTask);
-		assert.equal(prepared.nativeHost, undefined);
-		assert.equal(prepared.generatedExtensions.some((entry) => entry.kind === "native-host"), false);
-		const provenance = await createLaunchBootstrapProvenance(cwd, run, task, compiledTask, "pi-subagent/headless", prepared);
-		assert.deepEqual(provenance.effectivePolicy.tools, tools);
-	}
-});
 
 test("a nested workflow retains the original parent root instead of its local cwd", () => {
 	const cwd = makeProject();

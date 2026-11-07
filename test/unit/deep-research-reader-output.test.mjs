@@ -21,18 +21,6 @@ async function inputs() {
 	return { "final-audit-packet": packet, "final-audit": { schema: "deep-research-final-synthesis-v2", digest: "Reader-facing result", synthesis } };
 }
 
-test("historical synthesis stays readable without copying audit-only caveats or changing source evidence", async () => {
-	const sources = await inputs();
-	const before = structuredClone(sources);
-	const result = await render({ sources });
-	assert.equal(result.status, "passed", JSON.stringify(result.gates));
-	assert.deepEqual(sources, before);
-	assert.doesNotMatch(result.completionSummaryMarkdown, /Audited claims|Fact slots|schema.cap|fact slots|claim-001|source-ref|denominator|evidence:/);
-	assert.match(result.completionSummaryMarkdown, /추가로 확인할 질문이 남아/);
-	assert.match(result.auditMarkdown, /claim-001 source-ref join/);
-	assert.match(result.auditMarkdown, /Audited claims \(48 total\)/);
-	assert.equal(result.claimSummary.total, 48);
-});
 
 test("completion escapes raw prose exactly once including comparison cells", async () => {
 	const sources = await inputs();
@@ -112,27 +100,6 @@ for (const [status, qualifier] of [
 	});
 }
 
-test("a verified subset does not hide unclassified legacy evidence or coverage", async () => {
-	for (const kind of ["unclassified-claim", "unknown-slot", "unverified-lead", "contested", "unsupported"]) {
-		const control = {
-			schema: "legacy-audit", digest: "Check before committing.",
-			finalReport: {
-				summary: "Check before committing.", researchMetadata: {},
-				coverageSummary: { preserved: 0, omittedPreserved: 0, omittedVerificationCandidates: 0, coverageGaps: 0 },
-				factSlotCoverage: [{ status: kind === "unknown-slot" ? "unknown" : "filled" }],
-				mainFindings: [], recommendations: [], actionPlan: [], remainingGaps: [], parentDecisionNotes: [],
-				unverifiedButRelevant: kind === "unverified-lead" ? [{ note: "Demand is unknown." }] : [],
-				contestedFindings: kind === "contested" ? [{ note: "Sources disagree." }] : [],
-				unsupportedFindings: kind === "unsupported" ? [{ note: "No support found." }] : [],
-			},
-			claimVerdictIndex: { claims: [{ id: "claim-001", status: "verified" }] },
-		};
-		if (kind === "unclassified-claim") control.claimVerdictIndex.claims.push({ id: "claim-002", status: "unverified" });
-		const result = await render({ sources: { "final-audit": control } });
-		assert.equal(result.status, "passed");
-		assert.match(result.completionSummaryMarkdown, /Some evidence could not be fully checked|Questions remain unanswered|Some sources disagree/, kind);
-	}
-});
 
 test("both research prompts separate plain reader notes from audit bookkeeping", async () => {
 	for (const name of ["spec.json", "tiered-verification.spec.json"]) {

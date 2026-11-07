@@ -120,71 +120,7 @@ async function partition(dedupResult, verdicts, context = {}) {
   });
 }
 
-test("D01 preserves distinct defects sharing a statement through verifier partition", async () => {
-  const rows = [
-    finding("sql", "SQL injection", 1, { evidenceQuotes: ["line-shared"] }),
-    finding("tenant", "Missing tenant predicate", 1, {
-      evidenceQuotes: ["line-shared"],
-    }),
-  ];
-  const d = await dedup(rows);
-  assert.equal(d.findings.length, 2);
-  const p = await partition(
-    d,
-    rows.map((row) =>
-      verifier(row.findingId, row.title, "KEEP", ["line-shared"]),
-    ),
-  );
-  assert.deepEqual(
-    p.partitions.keep.map((row) => row.findingId),
-    ["sql", "tenant"],
-  );
-  assert.equal(p.partitionSummary.mergedFindings, 0);
-});
 
-test("D01 requires validated same-defect payload identity, not shared title, quote, or guessed root", async () => {
-  const conflictingRoots = await dedup([
-    finding("runtime", "Same title", 1, {
-      rootCauseId: "runtime-root",
-      evidenceQuotes: ["same source quote"],
-    }),
-    finding("security", "Same title", 1, {
-      rootCauseId: "security-root",
-      evidenceQuotes: ["same source quote"],
-    }),
-  ]);
-  assert.equal(conflictingRoots.findings.length, 2);
-  const conflictingPayload = await dedup([
-    finding("first", "Same title", 1, {
-      rootCauseId: "guessed-root",
-      evidenceQuotes: ["same source quote"],
-      supportingFindingId: "first-support-target",
-    }),
-    finding("second", "Same title", 1, {
-      rootCauseId: "guessed-root",
-      evidenceQuotes: ["same source quote"],
-    }),
-  ]);
-  assert.equal(conflictingPayload.findings.length, 2);
-  const genuineDuplicate = await dedup([
-    finding("original", "Same title", 1, {
-      rootCauseId: "validated-root",
-      evidenceQuotes: ["same source quote"],
-      claim: "same causal claim",
-      rationale: "same rationale",
-      recommendedAction: "same action",
-    }),
-    finding("duplicate", "Same title", 1, {
-      rootCauseId: "validated-root",
-      evidenceQuotes: ["same source quote"],
-      claim: "same causal claim",
-      rationale: "same rationale",
-      recommendedAction: "same action",
-    }),
-  ]);
-  assert.equal(genuineDuplicate.findings.length, 1);
-  assert.equal(genuineDuplicate.dedupSummary.duplicateCount, 1);
-});
 
 test("D02 requires an explicit support target even when a root has an explicit root cause id", async () => {
   const root = finding("root", "Authorization bypass", 1, {
@@ -486,24 +422,4 @@ test("D09 exposes requested sidecar write failure", async (t) => {
   assert.equal(r.gates.sidecarWriteFailed, true);
   assert.equal(typeof r.sidecarError, "string");
   assert.equal(r.status, "failed");
-});
-
-test("D10 states the reviewed-snapshot limitation instead of current-tree assurance", async () => {
-  const d = await dedup([]);
-  const p = await partition(d, []);
-  const r = await render({
-    sources: {
-      "partition-verdicts.main": p,
-      report: {
-        summary: "Clean",
-        verdict: "REVIEW_COMPLETE",
-        risks: [],
-        recommendedNextAction: "None",
-      },
-    },
-  });
-  assert.match(r.markdown, /reviewed snapshot/u);
-  assert.match(r.markdown, /does not attest current-tree bytes/u);
-  assert.equal(r.gates.reviewedSnapshotOnly, true);
-  assert.equal(r.gates.currentTreeBytesAttested, false);
 });

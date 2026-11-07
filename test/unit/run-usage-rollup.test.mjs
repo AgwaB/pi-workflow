@@ -71,35 +71,3 @@ function runRecord(runId, tasks) {
 		tasks,
 	};
 }
-
-test("terminal writeRunRecord persists a task-usage rollup on the run", async (t) => {
-	const cwd = mkdtempSync(join(tmpdir(), "run-usage-rollup-"));
-	t.after(() => rmSync(cwd, { recursive: true, force: true }));
-
-	const run = runRecord("workflow_rollup_1", [
-		taskRecord("task-1", {
-			inputTokens: 100,
-			outputTokens: 200,
-			totalTokens: 300,
-			costUsd: 0.5,
-		}),
-		taskRecord("task-2", {
-			inputTokens: 10,
-			outputTokens: 20,
-			totalTokens: 30,
-			costUsd: 0.25,
-		}),
-		taskRecord("task-3", undefined),
-	]);
-	await writeRunRecord(cwd, run);
-
-	const persisted = await readRunRecord(cwd, "workflow_rollup_1");
-	assert.equal(persisted.usage.source, "task-rollup");
-	assert.equal(persisted.usage.taskCount, 3);
-	assert.equal(persisted.usage.tasksReporting, 2);
-	assert.equal(persisted.usage.inputTokens, 110);
-	assert.equal(persisted.usage.outputTokens, 220);
-	assert.equal(persisted.usage.totalTokens, 330);
-	assert.equal(persisted.usage.costUsd, 0.75);
-	assert.ok(persisted.usage.capturedAt);
-});

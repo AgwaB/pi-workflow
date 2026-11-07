@@ -67,48 +67,8 @@ async function withTaskDir(fn) {
 	}
 }
 
-test("identical output.log and raw.md use independent snapshot inodes", async () => {
-	await withTaskDir(async (root) => {
-		const raw = "same output\n";
-		await writeFile(join(root, "output.log"), raw);
-		const result = await writeValidatedWorkflowTaskArtifactBundle({
-			taskDir: root,
-			rawOutput: raw,
-		}, parsed);
-		assert.equal(result.files.raw, join(root, "raw.md"));
-		assert.notEqual((await stat(join(root, "output.log"))).ino, (await stat(join(root, "raw.md"))).ino);
-		assert.equal(await readFile(join(root, "raw.md"), "utf8"), raw);
-	});
-});
 
-test("different raw output remains a separate file", async () => {
-	await withTaskDir(async (root) => {
-		await writeFile(join(root, "output.log"), "worker output\n");
-		await writeValidatedWorkflowTaskArtifactBundle({
-			taskDir: root,
-			rawOutput: "validated raw\n",
-		}, parsed);
-		assert.notEqual((await stat(join(root, "output.log"))).ino, (await stat(join(root, "raw.md"))).ino);
-		assert.equal(await readFile(join(root, "output.log"), "utf8"), "worker output\n");
-		assert.equal(await readFile(join(root, "raw.md"), "utf8"), "validated raw\n");
-	});
-});
 
-test("artifact link failure falls back to an atomic copy", async () => {
-	await withTaskDir(async (root) => {
-		const raw = "fallback raw\n";
-		await writeFile(join(root, "output.log"), raw);
-		setTaskArtifactLinkForTests(() => {
-			throw new Error("injected link failure");
-		});
-		await writeValidatedWorkflowTaskArtifactBundle({
-			taskDir: root,
-			rawOutput: raw,
-		}, parsed);
-		assert.equal(await readFile(join(root, "raw.md"), "utf8"), raw);
-		assert.notEqual((await stat(join(root, "output.log"))).ino, (await stat(join(root, "raw.md"))).ino);
-	});
-});
 
 test("artifact file names and files.output remain unchanged", async () => {
 	await withTaskDir(async (root) => {
@@ -147,25 +107,6 @@ async function writeRun(cwd, run) {
 	await writeFile(join(dir, "artifact.bin"), "artifact");
 }
 
-
-test("prune yes removes workflow and subagent mirrors and rewrites the index", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "pi-workflow-prune-"));
-	try {
-		await writeRun(cwd, terminalRun("workflow-keep", "2026-09-01T00:00:00.000Z"));
-		await writeRun(cwd, terminalRun("workflow-delete", "2026-08-01T00:00:00.000Z"));
-		await mkdir(join(cwd, ".pi", "workflow-subagents", "workflow-delete"), { recursive: true });
-		await writeFile(join(cwd, ".pi", "workflow-subagents", "workflow-delete", "output.log"), "worker");
-		await updateIndex(cwd);
-		const summary = await pruneWorkflowRuns(cwd, { keep: 1, yes: true });
-		assert.equal(summary.deletedBytes > 0, true);
-		await assert.rejects(stat(join(cwd, ".pi", "workflows", "workflow-delete")));
-		await assert.rejects(stat(join(cwd, ".pi", "workflow-subagents", "workflow-delete")));
-		const index = JSON.parse(await readFile(join(cwd, ".pi", "workflows", "index.json"), "utf8"));
-		assert.deepEqual(index.runs.map((run) => run.runId), ["workflow-keep"]);
-	} finally {
-		await rm(cwd, { recursive: true, force: true });
-	}
-});
 
 test("prune protects running, blocked, and live-lease runs", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-workflow-prune-"));

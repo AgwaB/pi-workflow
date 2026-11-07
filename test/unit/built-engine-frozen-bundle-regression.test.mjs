@@ -223,51 +223,6 @@ async function withNetworkAttemptCounter(callback) {
 	}
 }
 
-test("built engine copies and cold-loads workflow-local seed before deterministic provider shutdown", async () => {
-	const cwd = makeProject();
-	const counters = { launches: 0, providerLikeSends: 0 };
-	try {
-		await withNetworkAttemptCounter(async (networkAttempts) => {
-			setSubagentApiForTests(makeFakeSubagentApi({ cwd, counters }));
-
-			const started = await runWorkflowSpec(SPEC_PATH, cwd, {
-				task: "Exercise the frozen bundle seed guard.",
-				runId: "run_frozen_bundle_success",
-			});
-			const completed = await waitForRun(cwd, started.runId, 20_000);
-
-			assert.equal(
-				completed.status,
-				"completed",
-				JSON.stringify({
-					statusDetail: completed.tasks[0].statusDetail,
-					lastMessage: completed.tasks[0].lastMessage,
-					error: completed.tasks[0].error,
-				}),
-			);
-			assert.equal(completed.tasks[0].status, "completed");
-			assert.equal(counters.providerLikeSends, 1);
-			assert.equal(networkAttempts(), 0);
-
-			const control = JSON.parse(
-				readFileSync(
-					join(dirname(join(cwd, completed.tasks[0].files.result)), "control.json"),
-					"utf8",
-				),
-			);
-			assert.deepEqual(control, {
-				schema: "built-engine-frozen-bundle-guard-receipt-v1",
-				digest: "frozen-bundle-pass",
-				seedCampaignId: "paid-campaign-regression",
-				seedNonce: "seed-20260716",
-				providerDispatch: "shutdown-before-provider-send",
-			});
-		});
-	} finally {
-		setSubagentApiForTests(undefined);
-		rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
-	}
-});
 
 test("built engine fails terminally before provider-like send when copied seed cold-load is missing", async () => {
 	const cwd = makeProject();

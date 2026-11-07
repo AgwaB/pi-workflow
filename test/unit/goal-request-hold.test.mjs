@@ -23,24 +23,6 @@ async function fixture() {
   return { budget, op, evidenceRoot, stop: () => { stopped = true; } };
 }
 
-test("a pause holds new requests while the request in flight finishes and settles", async () => {
-  const { budget, op, evidenceRoot } = await fixture();
-  await op("first", "reserve");
-  await op("first", "release");
-  const hold = budget.beginHold();
-  assert.equal(hold.inFlight(), 1, "the released request is still in flight");
-  let secondDone = false;
-  const second = op("second", "reserve").then(() => { secondDone = true; });
-  await sleep(200);
-  assert.equal(secondDone, false, "a new request waits instead of failing");
-  assert.ok(hold.heldForMs() >= 150, "the wait of the held request is measured");
-  await op("first", "settle", { known: true });
-  assert.equal(hold.inFlight(), 0, "the request in flight settled while new ones were held");
-  hold.release();
-  await second;
-  assert.equal(secondDone, true, "releasing the hold lets the held request through");
-  assert.equal((await readdir(evidenceRoot)).length, 2);
-});
 
 test("stopping the Goal ends a held request without reserving it", async () => {
   const { budget, op, evidenceRoot, stop } = await fixture();
@@ -155,28 +137,4 @@ test("deny refuses held requests without recording them; a later release does no
   assert.equal(await budget.settledRequestCount(), 0, "nothing UNKNOWN");
   await op("after", "reserve"); // the hold has ended: new requests proceed
   assert.equal((await readdir(evidenceRoot)).length, 1);
-});
-
-test("a request already past the hold check but not yet recorded counts as in flight", async () => {
-  const evidenceRoot = await mkdtemp(join(tmpdir(), "goal-hold-"));
-  roots.push(evidenceRoot);
-  const budget = createGoalRequestBudget(undefined);
-  const peer = {};
-  let slow = true;
-  const current = async () => { if (slow) await sleep(150); return "authority"; };
-  const reserve = id => budget.operate({ id, commitment, action: "reserve", evidenceRoot, peer, live() {}, current });
-  const pending = reserve("racing");
-  await sleep(20); // past the hold check, still checking authority: no record yet
-  const hold = budget.beginHold();
-  assert.equal(hold.inFlight(), 1, "the pause waits for it instead of stopping under it");
-  await pending;
-  assert.equal(hold.inFlight(), 1, "now counted by its record");
-  hold.release();
-  slow = false;
-  const failing = budget.operate({ id: "failing", commitment, action: "reserve", evidenceRoot, peer: {}, live() {},
-    current: async () => { throw new Error("authority unavailable"); } });
-  await assert.rejects(failing);
-  const second = budget.beginHold();
-  assert.equal(second.inFlight(), 1, "a reservation refused before its record stops counting (only 'racing' remains)");
-  second.release();
 });

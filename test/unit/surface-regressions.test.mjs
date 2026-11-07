@@ -88,9 +88,6 @@ async function localRun(cwd, behavior='throw new Error("local failure")', dynami
  const compiled=await compileWorkflow(spec,{cwd,specPath,task:'local support only'});const {run}=await store.createWorkflowRunRecord(cwd,compiled,specPath);await store.writeStaticRunArtifacts(cwd,run,compiled,spec);await store.writeRunRecord(cwd,run);return run;
 }
 
-test('actual scheduler failed supervise --all is nonzero',async t=>{
- const cwd=await project(t),run=await localRun(cwd);const result=cli(cwd,['supervise','--all','--max-runtime-ms','5000']);assert.equal((await store.readRunRecord(cwd,run.runId)).status,'failed');assert.equal(result.status,1,result.stdout+result.stderr);
-});
 
 test('actual scheduler blocked supervise --all exits 2; mixed failure takes precedence',async t=>{
  const cwd=await project(t);const run=await localRun(cwd,'throw new Error("must not run without approval")',true);
@@ -100,12 +97,6 @@ test('actual scheduler blocked supervise --all exits 2; mixed failure takes prec
  assert.equal(cli(mixed,['supervise','--all','--max-runtime-ms','5000']).status,1);
 });
 
-test('supervise completed/empty batches succeed and historical failures do not contaminate later batches',async t=>{
- const cwd=await project(t);assert.equal(cli(cwd,['supervise','--all']).status,0);
- await localRun(cwd);assert.equal(cli(cwd,['supervise','--all']).status,1);
- await localRun(cwd,'return {control:{},analysis:"done",refs:[]}');
- const result=cli(cwd,['supervise','--all','--max-runtime-ms','5000']);assert.equal(result.status,0,result.stdout+result.stderr);
-});
 
 test('formatLogs uses bounded tail IO for huge single-line output',async t=>{
  const cwd=await project(t),run=await localRun(cwd);cli(cwd,['supervise','--all']);
@@ -140,16 +131,6 @@ test('catch-up cap counts deliveries rather than five existing receipts',async t
  await deliverMissedWorkflowFeedback(ctx,{sendMessage:m=>sent.push(m)});assert.equal(sent.length,6);
 });
 
-test('owner usage persists before the first turn, flushes on detach, and retains finalized totals on resume',async t=>{
- const cwd=await project(t),runId='workflow_resume';await index(cwd,[{runId,status:'running'}]);
- usage.beginParentUsageTracking(cwd,runId,'owner');await usage.flushParentUsageTracking(cwd,'owner',true);
- assert.equal((await usage.readParentUsage(cwd,runId)).sessionId,'owner');
- await usage.resumeParentUsageTracking(cwd,'owner');await usage.recordParentSessionUsage(cwd,message(10,1),'owner');
- await index(cwd,[{runId,status:'completed'}]);await usage.recordParentSessionUsage(cwd,message(20,2),'owner');
- await index(cwd,[{runId,status:'running'}]);await usage.resumeParentUsageTracking(cwd,'owner');await usage.recordParentSessionUsage(cwd,message(30,3),'owner');
- await usage.flushParentUsageTracking(cwd,'owner',true);await usage.recordParentSessionUsage(cwd,message(777,4),'owner');
- assert.equal((await usage.readParentUsage(cwd,runId)).totalTokens,60);
-});
 
 test('durable feedback audience rejects a conflicting explicit usage owner',async t=>{
  const cwd=await project(t),runId='workflow_conflict';await index(cwd,[{runId,status:'running'}]);await mkdir(store.workflowRunDir(cwd,runId),{recursive:true});

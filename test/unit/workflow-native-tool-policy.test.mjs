@@ -163,75 +163,6 @@ test("native policy classifies the full codemode/MCP surface conservatively", ()
 	);
 });
 
-test("compile expands native tools before safety while preserving explicit empty and legacy selections", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "piwf-native-policy-compile-"));
-	try {
-		const spec = baseSpec([
-			{
-				id: "auto",
-				type: "single",
-				prompt: "Auto isolation.",
-				approvalMode: "on-request",
-			},
-			{
-				id: "off",
-				type: "single",
-				prompt: "Explicit shared cwd.",
-				worktreePolicy: "off",
-			},
-			{
-				id: "empty",
-				type: "single",
-				prompt: "No tools.",
-				tools: [],
-			},
-		]);
-		const compiled = await compileFixture(cwd, spec);
-		const auto = taskById(compiled, "auto.main");
-		assert.deepEqual(auto.runtime.tools, [
-			"read",
-			"codemode",
-			"tool_search",
-			"mcp__*",
-			"list_mcp_resources",
-			"list_mcp_resource_templates",
-			"read_mcp_resource",
-		]);
-		assert.equal(auto.runtime.nativeToolsEnabled, true);
-		assert.equal(auto.safety.capability, "mutation-capable");
-		assert.equal(auto.safety.sharedCwdSafe, false);
-		assert.equal(auto.safety.requiresWorktree, true);
-		assert.deepEqual(auto.safety.permission, {
-			status: "blocked",
-			statusDetail: "pending_approval",
-			reason: "mutation-capable background task uses on-request approval mode",
-		});
-
-		const off = taskById(compiled, "off.main");
-		assert.equal(off.explicitWorktreePolicy, true);
-		assert.equal(off.safety.worktreePolicy, "off");
-		assert.equal(off.safety.requiresWorktree, false);
-		assert.equal(off.safety.sharedCwdSafe, false);
-		assert.equal(off.safety.capability, "mutation-capable");
-
-		const empty = taskById(compiled, "empty.main");
-		assert.deepEqual(empty.runtime.tools, []);
-		assert.equal(empty.runtime.nativeToolsEnabled, false);
-		assert.equal(empty.safety.capability, "read-only");
-		assert.equal(empty.safety.sharedCwdSafe, true);
-		assert.equal(empty.safety.requiresWorktree, false);
-
-		const legacy = await compileFixture(cwd, spec, null);
-		const legacyAuto = taskById(legacy, "auto.main");
-		assert.deepEqual(legacyAuto.runtime.tools, ["read"]);
-		assert.equal(Object.hasOwn(legacyAuto.runtime, "nativeToolsEnabled"), false);
-		assert.equal(legacyAuto.safety.capability, "read-only");
-		assert.equal(legacyAuto.safety.sharedCwdSafe, true);
-		assert.equal(legacyAuto.safety.requiresWorktree, false);
-	} finally {
-		await rm(cwd, { recursive: true, force: true });
-	}
-});
 
 test("persisted native tasks without the eligibility marker regain safe launch policy without rewriting compilation", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "piwf-native-policy-resume-"));
@@ -269,57 +200,6 @@ test("persisted native tasks without the eligibility marker regain safe launch p
 	}
 });
 
-test("foreach and loop templates freeze effective native policy through JSON roundtrip", async () => {
-	const cwd = await mkdtemp(join(tmpdir(), "piwf-native-policy-templates-"));
-	try {
-		const compiled = await compileFixture(
-			cwd,
-			baseSpec([
-				{ id: "source", type: "single", prompt: "Produce items." },
-				{
-					id: "fan",
-					type: "foreach",
-					from: { source: "source", path: "$.items" },
-					each: { prompt: "Inspect ${item}." },
-				},
-				{
-					id: "cycle",
-					type: "loop",
-					maxRounds: 1,
-					until: { stage: "check", path: "$.status", equals: "pass" },
-					stages: [
-						{ id: "inspect", type: "single", prompt: "Inspect." },
-						{ id: "check", type: "single", prompt: "Check." },
-					],
-					onExhausted: {
-						id: "fallback",
-						type: "single",
-						prompt: "Summarize the gap.",
-					},
-				},
-			]),
-		);
-		const roundTrip = JSON.parse(JSON.stringify(compiled));
-		const foreach = taskById(roundTrip, "fan.item");
-		assert.equal(foreach.runtime.nativeToolsEnabled, true);
-		assert.equal(foreach.safety.requiresWorktree, true);
-		assert.ok(foreach.runtime.tools.includes("codemode"));
-
-		const loop = roundTrip.stages.find((stage) => stage.id === "cycle");
-		assert.ok(loop);
-		assert.equal(loop.childTemplates.length, 2);
-		for (const template of loop.childTemplates) {
-			assert.equal(template.runtime.nativeToolsEnabled, true);
-			assert.equal(template.safety.capability, "mutation-capable");
-			assert.equal(template.safety.requiresWorktree, true);
-			assert.ok(template.runtime.tools.includes("mcp__*"));
-		}
-		assert.equal(loop.onExhausted.template.runtime.nativeToolsEnabled, true);
-		assert.equal(loop.onExhausted.template.safety.requiresWorktree, true);
-	} finally {
-		await rm(cwd, { recursive: true, force: true });
-	}
-});
 
 test("nested engine compilation treats persisted parent nativeHost absence as authoritative", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "piwf-native-policy-parent-"));

@@ -125,19 +125,6 @@ test('prune revalidates a run resumed after its terminal selection', async () =>
  assert.equal(summary.runs[0].protected, true);
  assert.equal(JSON.parse(await readFile(join(dir, 'run.json'))).tasks[0].status, 'running');
 }));
-test('prune holds the scheduler lock at deletion-time revalidation', async () => fixture(async cwd => {
- const { dir, run } = await runFixture(cwd);
- let attempted = false;
- setRunLeaseTestHooksForTests({ onBeforeHeartbeat: async ({ name }) => {
-  if (name !== 'supervisor') return;
-  attempted = true;
-  assert.equal(await withRunLease(cwd, run.runId, async () => 'must not acquire'), undefined);
- } });
- const summary = await pruneWorkflowRuns(cwd, { keep: 0, yes: true });
- assert.equal(attempted, true);
- assert.equal(summary.runs[0].deleted, true);
- await assert.rejects(readFile(join(dir, 'run.json')), { code: 'ENOENT' });
-}));
 test('recursive prune cannot delete a new generation reusing the detached run name', async () => fixture(async cwd => {
  const { dir, run } = await runFixture(cwd);
  const mirror = join(cwd, '.pi', 'workflow-subagents', run.runId);

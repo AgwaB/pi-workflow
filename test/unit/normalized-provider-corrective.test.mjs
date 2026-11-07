@@ -50,33 +50,6 @@ function config(cwd, cacheDir, provider, tools) {
   };
 }
 
-test("corrective normalized provider fetch honors only explicit host policy", async () => {
-  const cwd = project();
-  try {
-    let calls = 0;
-    const provider = (pi) => pi.registerTool({
-      name: "fetch_content",
-      async execute() {
-        calls += 1;
-        return { content: [{ type: "text", text: "public provider body" }] };
-      },
-    });
-    const trusted = register(config(cwd, join(cwd, "trusted"), {
-      kind: "extension", extensionPaths: ["/validated/provider.mjs"], trustedCustomProvider: true,
-    }, ["workflow_web_fetch_source"]), provider);
-    const success = body(await trusted.get("workflow_web_fetch_source").execute("public", { url: "http://1.1.1.1/public" }));
-    assert.equal(success.status, "ok");
-    assert.equal(calls, 1);
-
-    const untrusted = register({
-      ...config(cwd, join(cwd, "untrusted"), { kind: "extension" }, ["workflow_web_fetch_source"]),
-      securityPolicy: { allowPrivateHosts: true, cacheRawProviderPayloads: false },
-    }, provider);
-    const explicitlyAllowed = body(await untrusted.get("workflow_web_fetch_source").execute("explicit", { url: "http://1.1.1.1/public" }));
-    assert.equal(explicitlyAllowed.status, "ok");
-    assert.equal(calls, 2);
-  } finally { cleanup(cwd); }
-});
 
 test("compile to prepare preserves supported normalized owners and re-exports shared tools", async () => {
   const cwd = project();

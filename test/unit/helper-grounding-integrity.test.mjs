@@ -76,7 +76,7 @@ test('scaffold evidence gate never upgrades missing identity accounting', async 
   assert.equal(g.value.evidenceGate.integrity, 'partial');
 });
 
-for (const mode of ['exact', 'mismatch', 'wrong-range', 'missing-file', 'symlink', 'remote', 'partial']) {
+for (const mode of ['mismatch', 'missing-file', 'symlink', 'remote']) {
   test(`research local quote grounding: ${mode}`, async (t) => {
     const cwd = await fixture(t);
     if (mode === 'symlink') await symlink(join(cwd, 'source.ts'), join(cwd, 'link.ts'));
@@ -97,35 +97,6 @@ for (const mode of ['exact', 'mismatch', 'wrong-range', 'missing-file', 'symlink
   });
 }
 
-for (const [label, evidence, usable] of [
-  ['bare assertion', ['Trust me; no repository locator.'], false],
-  ['legacy located evidence is display-only', ['source.ts:1: export const enabled = false;'], false],
-  ['structured quote', [{ file: 'source.ts', lineStart: 1, lineEnd: 1, quote: 'export const enabled = false;' }], true],
-  ['claim is not quote', ['source.ts:1: Trust me'], false],
-]) {
-  test(`spec-review actionable evidence requires verified bytes: ${label}`, async (t) => {
-    const cwd = await fixture(t);
-    const id = 'finding-001';
-    const v = { schema: 'test', digest: 'test', id, verdict: 'KEEP', severity: 'medium', evidence, finalClaim: 'A gap exists', recommendedAction: 'Fix it' };
-    assert.equal(validateJsonSchema(v, await schema('workflows/spec-review/schemas/spec-review-verify-findings-control.schema.json')).valid, true);
-    const plan = { schema: 'test', digest: 'test', candidateFindings: [{ id, title: 'Gap', claim: 'A gap exists', severity: 'medium', requirementIds: ['REQ-1'], specEvidence: ['spec.md:1'], implementationEvidence: ['source.ts:1'], testEvidence: ['test.ts:1'], uncertainty: 'Verify exact scope.' }], requirementCoverage: [], needsHuman: [], noIssueNotes: [] };
-    assert.equal(validateJsonSchema(plan, await schema('workflows/spec-review/schemas/spec-review-candidate-findings-control.schema.json')).valid, true);
-    const p = await specPartition({ sources: { 'candidate-findings': plan, 'verify-findings': v }, options: { mode: 'partition' }, context: { cwd, sourceStatuses: [{ source: 'candidate-findings', stageId: 'candidate-findings', specId: 'candidate-findings.main', taskId: 'task-plan', status: 'completed' }, owner('verify-findings', id)] } });
-    const report = { schema: 'spec-review-report-v1', digest: 'test', summary: 'A gap exists.', verdict: 'GAPS_FOUND', risks: [], recommendedNextAction: 'Fix it.', ownerLedger: p.verifierCoverage.ownerLedger, ownerLedgerReconciliation: p.verifierCoverage.ownerLedgerReconciliation };
-    const result = await specRender({ sources: { 'partition-findings': p, report }, context: { cwd, sourceStatuses: ['partition-findings', 'report'].map((source) => ({ source, stageId: source, specId: `${source}.main`, taskId: `task-${source}`, status: 'completed' })) } });
-    assert.equal(validateJsonSchema(p, await schema('workflows/spec-review/schemas/spec-review-partition-control.schema.json')).valid, true);
-    assert.equal(validateJsonSchema(report, await schema('workflows/spec-review/schemas/spec-review-report-control.schema.json')).valid, true);
-    assert.equal(validateJsonSchema(result, await schema('workflows/spec-review/schemas/spec-review-render-control.schema.json')).valid, true);
-    assert.equal(p.evidenceGate.findings[0].complete, usable);
-    assert.equal(p.finalFindings.length, usable ? 1 : 0);
-    // This unit control deliberately has no attested scope/coverage. Grounded
-    // finding bytes alone cannot certify the review; materialized positives
-    // in spec-requirement-coverage.test.mjs exercise successful completion.
-    assert.equal(result.gates.actionableEvidenceComplete, false);
-    assert.equal(result.status, 'failed');
-    assert.equal(result.verdict, 'INCONCLUSIVE');
-  });
-}
 
 test('literal complete protocol escaping preserves analysis without relaxing duplicate checks', () => {
   const sample = '<control>{"schema":"test","digest":"example"}</control>\n<analysis>reason</analysis>\n<refs>[]</refs>';

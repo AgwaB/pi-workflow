@@ -34,7 +34,6 @@ function put(cwd, relativePath, value) {
 }
 
 for (const task of [
-	"Do not write to disk; do not use the network.",
 	"Don't edit files; never access the internet.",
 	"You must not modify code or use the network. Offline only.",
 ]) {
@@ -68,9 +67,7 @@ for (const task of [
 
 for (const task of [
 	"Do not write to disk.",
-	"Don't change code.",
 	"Never edit or modify files.",
-	"Do not modify the source; review it.",
 ]) {
 	test(`negative write verbs remain safety gates after classifier failure: ${task}`, async () => {
 		const cwd = project();

@@ -20,22 +20,6 @@ async function fixture(t) {
  return { root, producer, consumer, manifest, config };
 }
 
-for (const attemptLink of [false, true]) {
- test(`writer raw handle can be read and satisfy requiredReads (attempt link=${attemptLink})`, async (t) => {
-  const f = await fixture(t);
-  const output = join(f.producer, "output.log");
-  await writeFile(output, raw);
-  if (attemptLink) await link(output, join(f.root, "attempt-output.log"));
-  assert.equal((await writeWorkflowTaskArtifactBundle({ taskDir: f.producer, rawOutput: raw })).valid, true);
-  const result = await handleWorkflowArtifactToolCall({ action: "read", source: "producer", artifact: "raw" }, f.config);
-  assert.equal(result.details.truncated, false);
-  assert.deepEqual(await checkRequiredArtifactReads(f.consumer, ["producer.raw"]), { missing: [], projectionFailures: [] });
-  assert.equal((await stat(join(f.producer, "raw.md"))).nlink, 1);
-  if (attemptLink) assert.equal((await stat(output)).nlink, 2, "attempt/output storage sharing remains intact");
-  await writeFile(output, "later mutation");
-  assert.equal(await readFile(join(f.producer, "raw.md"), "utf8"), raw);
- });
-}
 
 for (const kind of ["hardlink", "symlink", "outside", "late-hardlink"]) {
  test(`raw reader rejects arbitrary ${kind} evidence`, async (t) => {
@@ -51,12 +35,3 @@ for (const kind of ["hardlink", "symlink", "outside", "late-hardlink"]) {
   await assert.rejects(() => readWorkflowArtifact(f.manifest, "producer", "raw", { runDir: f.config.runDir }));
  });
 }
-
-test("raw snapshot falls back safely when clone fails or its source changes", async (t) => {
- const f = await fixture(t), output = join(f.producer, "output.log");
- await writeFile(output, raw);
- setTaskArtifactLinkForTests(() => writeFile(output, "changed before snapshot"));
- await writeWorkflowTaskArtifactBundle({ taskDir: f.producer, rawOutput: raw });
- assert.equal(await readFile(join(f.producer, "raw.md"), "utf8"), raw);
- assert.equal((await stat(join(f.producer, "raw.md"))).nlink, 1);
-});

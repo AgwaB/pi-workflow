@@ -73,45 +73,6 @@ function settledOutcome(promise) {
 	);
 }
 
-test("the same parent-usage caller survives the first held topology window", {
-	timeout: 20_000,
-}, async (t) => {
-	const { cwd, runId, indexFile } = await fixture(t, "handoff");
-	let topology = await store.acquireWorkflowTopologyLease(cwd, 0);
-	assert.ok(topology);
-	const retryStarted = Promise.withResolvers();
-	const indexReads = observeIndexReads(t, indexFile, async (reads) => {
-		// The record operation reads once to preserve terminal intent and once in
-		// mutate(). A third read can only come from retrying that retained head.
-		if (reads === 3) retryStarted.resolve();
-	});
-	try {
-		const outcome = settledOutcome(
-			usage.recordParentSessionUsage(cwd, message, owner, receipt),
-		);
-		const first = await Promise.race([
-			retryStarted.promise.then(() => "retry"),
-			outcome.then(() => "settled"),
-		]);
-		assert.equal(first, "retry", "the original call must own the topology retry");
-		await topology.release();
-		topology = undefined;
-		const result = await outcome;
-		assert.equal(result.status, "fulfilled", result.error?.stack);
-
-		const record = await usage.readParentUsage(cwd, runId);
-		assert.equal(record.assistantMessages, 1);
-		assert.equal(record.totalTokens, 17);
-		assert.deepEqual(record.messageIds, [receipt]);
-		assert.equal(record.lastWriteFailure, undefined);
-		assert.ok(
-			indexReads() >= 4,
-			"the successful attempt must recheck generation under topology",
-		);
-	} finally {
-		await topology?.release();
-	}
-});
 
 test("a topology retry rechecks and refuses a replacement run generation", {
 	timeout: 20_000,

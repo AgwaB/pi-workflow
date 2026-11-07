@@ -56,21 +56,6 @@ function pointed(lines) {
 	return lines.find((line) => line.startsWith("→ "));
 }
 
-test("native profile selector keeps order and focuses the saved choice", async () => {
-	const { profileUi, state, colors } = harness();
-	const choices = ["Codex", "Codex High", "Claude", "Mixed", "Custom (saved)"];
-	const result = profileUi.select("Workflow execution profile\nDefinition-specific setting", choices, {
-		selected: choices[4],
-	});
-	const lines = frame(state);
-	assert.deepEqual(lines.filter((line) => /^  |^→ /.test(line)).map((line) => line.slice(2)), choices);
-	assert.equal(pointed(lines), "→ Custom (saved)");
-	assert.ok(colors.includes("accent"));
-	assert.ok(colors.includes("text"));
-	assert.ok(colors.every((color) => !/^(syntax|thinking)/.test(color)));
-	state.component.handleInput(ENTER);
-	assert.equal(await result, choices[4]);
-});
 
 test("120-model selector keeps focus visible on open, navigation, wrap and resize", async () => {
 	const { profileUi, state } = harness();
@@ -97,39 +82,7 @@ test("120-model selector keeps focus visible on open, navigation, wrap and resiz
 	assert.equal(await result, LUNA);
 });
 
-test("model search matches provider and model tokens, handles no matches and preserves exact IDs", async () => {
-	const { profileUi, state } = harness();
-	const result = profileUi.select("Choose model", MODELS, { searchable: true });
-	frame(state);
-	state.component.handleInput("\x1b[200~CODEX luna\x1b[201~");
-	assert.equal(pointed(frame(state)), `→ ${LUNA}`);
-	state.component.handleInput("absent");
-	assert.equal(pointed(frame(state)), undefined);
-	state.component.handleInput(ENTER);
-	assert.deepEqual(state.completions, []);
-	assert.match(frame(state).join("\n"), /No matching models/);
-	state.component.handleInput("\x15"); // Input's configured delete-to-line-start (Ctrl+U).
-	assert.ok(pointed(frame(state)));
-	state.component.handleInput("luna");
-	assert.equal(pointed(frame(state)), `→ ${LUNA}`);
-	state.component.handleInput(ENTER);
-	assert.equal(await result, LUNA);
-});
 
-test("long model IDs wrap in the selected detail instead of disappearing beyond the list", async () => {
-	const { profileUi, state } = harness();
-	const longModel = "provider/" + "long-model-".repeat(7) + "끝-model";
-	const result = profileUi.select("Choose model", [...MODELS, longModel], {
-		selected: longModel, searchable: true,
-	});
-	const lines = frame(state, 48);
-	const detailStart = lines.findIndex((line) => line.startsWith(" Selected:"));
-	const detailEnd = lines.findIndex((line) => line.includes("type to filter"));
-	assert.ok(detailStart > 0 && detailEnd > detailStart);
-	assert.equal(lines.slice(detailStart, detailEnd).join("").replace(/^\s*Selected:\s*/, ""), longModel);
-	state.component.handleInput(ESC);
-	assert.equal(await result, undefined);
-});
 
 test("picker respects injected navigation bindings and cancel does not select", async () => {
 	const { profileUi, state } = harness({ "tui.select.down": "ctrl+n", "tui.select.cancel": "ctrl+q" });

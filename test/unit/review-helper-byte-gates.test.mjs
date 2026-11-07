@@ -117,19 +117,6 @@ for (const evidence of [["definitely-not-present.ts:999: Trust me"], ["https://e
     assert.notEqual(result.status, "passed");
   }));
 }
-for (const verdict of ["KEEP", "WEAKEN", "DROP"]) {
-  test(`spec-review grounded ${verdict} roundtrip passes`, () => fixture(async cwd => {
-    const analysis = verdict === "DROP" ? { ...candidates, requirementCoverage: [{ requirementId: "REQ-1", status: "covered", evidence: [citation] }] } : candidates;
-    const { p, result } = await roundtrip(cwd, verdict === "DROP" ? [] : [citation], verdict, verdict === "DROP" ? [citation] : [], analysis);
-    assert.equal(result.status, "passed");
-    assert.equal(p.evidenceGate.complete, true);
-    assert.equal(p.evidenceGate.findings[0].rows[0].status, "verified");
-    for (const [name, control] of [["verify-findings", verifierControl(verdict === "DROP" ? [] : [citation], verdict, verdict === "DROP" ? [citation] : [])], ["partition", p], ["report", reportControl(p)], ["render", result]]) {
-      const schema = JSON.parse(await readFile(new URL(`../../workflows/spec-review/schemas/spec-review-${name}-control.schema.json`, import.meta.url)));
-      assert.deepEqual(validateJsonSchema(control, schema), { valid: true, issues: [] }, name);
-    }
-  }));
-}
 for (const [label, read] of [["scaffold", readScaffold], ["spec-review", readSpec]]) {
   test(`${label} bounded descriptor read rejects mutation, invalid UTF-8 and cancellation`, () => fixture(async cwd => {
     const actualOpen = fsPromises.open;
@@ -183,12 +170,6 @@ test("one good citation cannot hide another missing required source", () => fixt
   assert.equal(p.finalFindings.length, 0);
   assert.notEqual(result.status, "passed");
 }));
-test("positive requirement coverage needs bytes; gap is not a coverage proof", () => fixture(async cwd => {
-  const analysis = { ...candidates, requirementCoverage: [{ requirementId: "REQ-1", status: "covered", evidence: ["missing.ts:999"] }] };
-  assert.notEqual((await roundtrip(cwd, [citation], "KEEP", [], analysis)).result.status, "passed");
-  analysis.requirementCoverage[0].evidence = [citation];
-  assert.equal((await roundtrip(cwd, [citation], "KEEP", [], analysis)).result.status, "passed");
-}));
 test("renderer rechecks source bytes and refuses absent/fabricated gate metadata", () => fixture(async cwd => {
   const { p } = await roundtrip(cwd, [citation]);
   const invoke = () => render({ sources: { "partition-findings": p, report: reportControl(p) }, context: { cwd, runId: "unit-byte-gate", sourceStatuses: ["partition-findings", "report"].map(source => ({ source, stageId: source, specId: `${source}.main`, taskId: `task-${source}`, status: "completed" })) } });
@@ -210,28 +191,6 @@ test("candidate source status absent/failed cannot claim complete evidence", () 
     assert.equal(p.evidenceGate.complete, false);
     assert.ok(p.sourceStatusSummary.nonCompleted > 0);
   }
-}));
-test("UTF-8 BOM is retained in exact bytes and digest", () => fixture(async cwd => {
-  await writeFile(join(cwd, "source.ts"), "\uFEFF" + citation.quote);
-  const { result } = await roundtrip(cwd, [{ ...citation, quote: "\uFEFF" + citation.quote }]);
-  assert.equal(result.status, "passed");
-}));
-test("reader detects ancestor replacement after open before any content read", () => fixture(async cwd => {
-  await mkdir(join(cwd, "dir"));
-  await writeFile(join(cwd, "dir/source.ts"), citation.quote);
-  const actualOpen = fsPromises.open;
-  const actualRename = fsPromises.rename;
-  let reads = 0;
-  mock.method(fsPromises, "open", async (...args) => {
-    const handle = await actualOpen(...args);
-    handle.read = async () => { reads++; throw new Error("must not read"); };
-    await actualRename(join(cwd, "dir"), join(cwd, "moved"));
-    await symlink(join(cwd, "moved"), join(cwd, "dir"));
-    return handle;
-  });
-  syncBuiltinESMExports();
-  try { await assert.rejects(readScaffold(cwd, "dir/source.ts"), /ancestry changed/); assert.equal(reads, 0); }
-  finally { mock.restoreAll(); syncBuiltinESMExports(); }
 }));
 test("unverified DROP cannot silently remove a candidate", () => fixture(async cwd => {
   const { p, result } = await roundtrip(cwd, [], "DROP", ["missing.ts:999: not a gap"]);

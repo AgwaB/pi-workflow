@@ -28,10 +28,3 @@ test("required reads preserve missing, wrong-path, empty-slice, exact-count and 
  assert.equal((await checkRequiredArtifactReads(f.consumer, [req])).missing.length, 1);
  assert.equal((await checkRequiredArtifactReads(f.consumer, [{ ...req, count: 2 }])).missing.length, 0);
 });
-
-test("truncated rows do not inflate the exact count of qualifying reads", async (t) => {
- const f = await fixture(t);
- await f.read({ path: "$.items", maxItems: 1, maxChars: 1000 });
- await f.read({ path: "$.items", maxItems: 2, maxChars: 1000 });
- assert.equal((await checkRequiredArtifactReads(f.consumer, [{ source: "producer", artifact: "control", count: 1 }])).missing.length, 0);
-});

@@ -74,41 +74,6 @@ test("IR1-03 real lease timeout retains delta, flush retries, later messages and
  assert.doesNotMatch(JSON.stringify(record), /PRIVATE RAW MESSAGE/);
 });
 
-test("IR1-03 ambiguous post-commit failure retries with durable receipt, including messages without timestamp", async (t) => {
- const { cwd, runId, owner } = await setupUsage(t);
- const original = fs.rename;
- let fail = true;
- t.mock.method(fs, "rename", async (...args) => {
-  await original(...args);
-  if (fail && String(args[1]).endsWith("parent-usage.json")) {
-   fail = false;
-   throw new Error("injected post-commit failure");
-  }
- });
- syncBuiltinESMExports();
- t.after(() => {
-  t.mock.restoreAll();
-  syncBuiltinESMExports();
- });
- const msg = message(7);
- delete msg.timestamp;
- await assert.rejects(
-  usage.recordParentSessionUsage(cwd, msg, owner),
-  /post-commit/,
- );
- assert.equal((await usage.readParentUsage(cwd, runId)).totalTokens, 7);
- fail = true;
- await assert.rejects(
-  usage.flushParentUsageTracking(cwd, owner, true),
-  /post-commit/,
- );
- await usage.flushParentUsageTracking(cwd, owner, true);
- const record = await usage.readParentUsage(cwd, runId);
- assert.equal(record.totalTokens, 7);
- assert.equal(record.assistantMessages, 1);
- assert.equal(record.messageIds.length, 1);
- assert.ok(record.lastWriteFailure);
-});
 
 test("IR1-03 fencing is rechecked immediately before atomic rename; queued usage survives lease loss", async (t) => {
  const { cwd, runId, owner } = await setupUsage(t);

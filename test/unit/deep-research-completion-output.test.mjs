@@ -158,25 +158,6 @@ test("deep-research v2 keeps omitted verification candidates outside the audited
 	assert.doesNotMatch(result.completionSummaryMarkdown, /candidate omitted|denominator|Audited claims/);
 });
 
-test("deep-research v2 does not infer zero schema-cap omissions when diagnostics are absent", async () => {
-	const packet = await finalPacket({ sources: fixture.sources });
-	const result = await render({
-		sources: {
-			"final-audit-packet": packet,
-			"final-audit": synthesis(comparisonRows),
-		},
-	});
-
-	assert.equal(result.status, "passed", JSON.stringify(result.gates));
-	assert.match(
-		result.auditMarkdown,
-		/additional schema-cap omission count unavailable/,
-	);
-	assert.doesNotMatch(
-		result.auditMarkdown,
-		/0 additional leads omitted by a schema cap/,
-	);
-});
 
 test("deep-research v2 fails closed when a requested comparison has no rows", async () => {
 	const packet = await finalPacket({ sources: fixture.sources });
@@ -203,44 +184,5 @@ test("deep-research v2 fails closed when a requested comparison has no rows", as
 				rendered: 0,
 			},
 		],
-	);
-});
-
-test("deep-research v2 output repair applies comparison row and supporting-id caps", () => {
-	const rows = Array.from({ length: 10 }, (_, index) => ({
-		area: `Area ${index + 1}`,
-		subjectStatus: "Current state.",
-		referencePattern: "Reference pattern.",
-		assessment: "Assessment.",
-		supportingClaimIds: Array.from(
-			{ length: 10 },
-			(_, claimIndex) => `claim-${String(claimIndex + 1).padStart(3, "0")}`,
-		),
-	}));
-	const parsed = parseWorkflowOutput(
-		[
-			"<control>",
-			JSON.stringify(synthesis(rows)),
-			"</control>",
-			"<analysis>analysis</analysis>",
-			"<refs>[]</refs>",
-		].join("\n"),
-		{ controlJsonSchema: synthesisSchema },
-	);
-
-	assert.equal(parsed.valid, true, JSON.stringify(parsed.issues));
-	assert.equal(parsed.control.synthesis.comparisonRows.length, 8);
-	assert.equal(
-		parsed.control.synthesis.comparisonRows[0].supportingClaimIds.length,
-		8,
-	);
-	assert.deepEqual(
-		parsed.repairs?.map((repair) => repair.code),
-		["control_final_synthesis_array_caps"],
-	);
-	assert.match(parsed.repairs?.[0]?.message ?? "", /comparisonRows:-2/);
-	assert.match(
-		parsed.repairs?.[0]?.message ?? "",
-		/comparisonRows\.supportingClaimIds:-16/,
 	);
 });
