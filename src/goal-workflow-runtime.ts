@@ -4572,6 +4572,19 @@ export function trackGoalTemporaryDirectory(path: string): string {
   }
   return path;
 }
+/**
+ * Unix socket paths are short (macOS/BSD: 103 bytes plus NUL, Linux: 107). A long
+ * TMPDIR would make the private Goal socket fail to listen (EINVAL), so its
+ * directory falls back to /tmp, still a fresh mkdtemp (mode 0700, random name).
+ */
+const GOAL_SOCKET_PATH_LIMIT = 103;
+export function goalSocketTemporaryParent(prefix: string, socketRelativePath: string): string {
+  const preferred = tmpdir();
+  if (process.platform === "win32" ||
+      Buffer.byteLength(join(preferred, `${prefix}XXXXXX`, socketRelativePath)) <= GOAL_SOCKET_PATH_LIMIT)
+    return preferred;
+  return "/tmp";
+}
 async function removeGoalTemporaryDirectory(path: string): Promise<void> {
   await rm(path, { recursive: true, force: true });
   goalTemporaryDirectories.delete(path);
@@ -4997,7 +5010,9 @@ export async function prepareWorkflowGoalRequestChannel(cwd: string, run: Workfl
       sourceVerifier.prepared !== prepared || sourceVerifier.input !== binding.input ||
       sourceVerifier.task.taskId !== task.taskId || sourceVerifier.generation !== binding.generation))
     throw new Error("Goal request original source verifier unavailable");
-  const directory = trackGoalTemporaryDirectory(await mkdtemp(join(tmpdir(), "pi-goal-requests-")));
+  // "rpc/requests.sock" is created by openGoalRequestBudgetChannel.
+  const directory = trackGoalTemporaryDirectory(await mkdtemp(join(
+    goalSocketTemporaryParent("pi-goal-requests-", join("rpc", "requests.sock")), "pi-goal-requests-")));
   // The private socket directory is removed once its channel has drained.
   const removeDirectory = () => removeGoalTemporaryDirectory(directory);
   try { live(); } catch (error) { await removeDirectory(); throw error; }
@@ -5771,7 +5786,9 @@ export async function prepareWorkflowGoalCandidateChannel(cwd: string, run: Work
       goalHash({ ownerRunId: owner.rootRunId, ownerTaskId: ownerTask.taskId, policy: owner.policy.id,
         generation: boundGeneration }));
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const socketDirectory = trackGoalTemporaryDirectory(await mkdtemp(join(tmpdir(), "pi-goal-candidate-rpc-")));
+    // "rpc/tools.sock" is created by openGoalCandidateToolChannel.
+    const socketDirectory = trackGoalTemporaryDirectory(await mkdtemp(join(
+      goalSocketTemporaryParent("pi-goal-candidate-rpc-", join("rpc", "tools.sock")), "pi-goal-candidate-rpc-")));
     const removeSocketDirectory = () => removeGoalTemporaryDirectory(socketDirectory);
     try { await current(false); live(); } catch (error) { await removeSocketDirectory(); throw error; }
     const channel = await openGoalCandidateToolChannel({
