@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const ts = createRequire(join(repo, 'package.json'))('typescript');
-const source = readFileSync(join(repo, 'test/unit/goal-public-runtime.test.mjs'), 'utf8');
+const source = readFileSync(join(repo, 'test/unit/goal-public-runtime-shared.mjs'), 'utf8');
 const sf = ts.createSourceFile('fixture.mjs', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
 function body(name) {
   const matches = [];

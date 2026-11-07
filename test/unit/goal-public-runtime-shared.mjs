@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import test, { after } from "node:test";
+import nodeTest, { after } from "node:test";
+import { goalRuntimeShardAdmits } from "./goal-public-runtime-shard.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { randomBytes } from "node:crypto";
@@ -29,6 +30,10 @@ import { tmpdir, loadavg as osLoadAverage, availableParallelism as osCpuCount } 
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { goalCommandSandboxAvailable } from "../../.tmp/unit/goal-command-verifier.js";
+
+// Loaded by goal-public-runtime-N.test.mjs (one shard each) and by
+// goal-public-runtime-all.mjs (every test, used by the producer subprocesses).
+const test = (name, ...rest) => goalRuntimeShardAdmits(name) ? nodeTest(name, ...rest) : undefined;
 
 // The Goal runtime unrefs its background timers (stop polling, channel
 // retirement) so they never keep a Pi host alive. A real host stays alive while
@@ -90,7 +95,6 @@ import {
   user,
 } from "./helpers/goal-fixture.mjs";
 
-import "./helpers/goal-authenticated-local-channel.test.mjs";
 const budgetTestPeer = Object.freeze({ connection: Symbol("test-peer") });
 
 
@@ -2012,7 +2016,7 @@ test(`NONAUTHORITY offline ordinary Goal cold producer exact-root prune acceptan
     // This is a separate test runner, not an inherited test-file worker.
     delete producerEnv.NODE_TEST_CONTEXT;
     const producer = spawnSync(process.execPath, ["--import", resolve("test/e2e/no-external-actions-guard.mjs"),
-      "--test", "--test-reporter=tap", `--test-name-pattern=^${ordinaryClosureProducerName}$`, resolve("test/unit/goal-public-runtime.test.mjs")], {
+      "--test", "--test-reporter=tap", `--test-name-pattern=^${ordinaryClosureProducerName}$`, resolve("test/unit/goal-public-runtime-all.mjs")], {
       env: producerEnv,
       encoding: "utf8", timeout: testMs(60_000), maxBuffer: 8 * 1024 * 1024,
     });
@@ -16181,7 +16185,7 @@ test(mode === "sequential"
     ? "mixed ordinary wrapper Goal root maxDepth two accepts captured wrapper with embedded terminal Goal"
     : "one-level Goal to standalone Goal actual SDK parent planner child planner worker and independent immutable oracles";
   const producer = spawnSync(process.execPath, ["--import", resolve("test/e2e/no-external-actions-guard.mjs"),
-    "--test", "--test-reporter=tap", `--test-name-pattern=^${producerName}$`, resolve("test/unit/goal-public-runtime.test.mjs")],
+    "--test", "--test-reporter=tap", `--test-name-pattern=^${producerName}$`, resolve("test/unit/goal-public-runtime-all.mjs")],
     { env, encoding: "utf8", timeout: testMs(60_000), maxBuffer: 8 * 1024 * 1024 });
   assert.equal(producer.error, undefined, `${producer.error}\n${producer.stdout}\n${producer.stderr}`);
   assert.equal(producer.signal, null);
