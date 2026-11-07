@@ -11197,6 +11197,16 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.deepEqual(commandMessages.map(({ level }) => level), ["warning"]);
       assert.equal(await readFile(join(cwd, ".pi", "workflows", run.runId, "run.json"), "utf8"), beforeRepeat,
         "reporting a finished stop changes nothing");
+      // The pending reply says "Retry /workflow stop"; for a stopped Goal that
+      // retry points to the Goal's own next step, never /workflow resume.
+      commandMessages.length = 0;
+      await commands.get("workflow").handler(`stop ${run.runId}`, commandContext);
+      const stopReport = commandMessages.at(-1);
+      assert.equal(stopReport.level, "warning");
+      assert.ok(stopReport.message.startsWith("Workflow stopped: "), stopReport.message);
+      assert.ok(stopReport.message.endsWith(paused), stopReport.message);
+      assert.doesNotMatch(stopReport.message, /\/workflow resume /);
+      assert.equal(await readFile(join(cwd, ".pi", "workflows", run.runId, "run.json"), "utf8"), beforeRepeat);
     } else run = (await stopRun(cwd, run.runId)).run;
     assert.equal(run.status, "interrupted");
     const stoppedWorker = run.tasks.find(task => task.taskId === originalWorker.taskId);

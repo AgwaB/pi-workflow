@@ -19,11 +19,14 @@ function sshString(value: Buffer): Buffer {
   return Buffer.concat([length, value]);
 }
 
+const ED25519_PKCS8_SEED_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 function opensshPrivateKey(publicKey: Buffer, privateSeed: Buffer): Buffer {
   if (publicKey.length !== 32 || privateSeed.length !== 32)
     throw new Error("Goal Ed25519 host key has an invalid raw key length");
-  const privateJwk = { kty: "OKP", crv: "Ed25519", x: publicKey.toString("base64url"), d: privateSeed.toString("base64url") };
-  const privateObject = createPrivateKey({ key: privateJwk, format: "jwk" });
+  // Derive the public key from the seed alone (PKCS#8), then compare. A JWK
+  // with both parts is rejected by newer Node versions themselves ("Invalid JWK
+  // OKP key"), which would hide this explicit mismatch check.
+  const privateObject = createPrivateKey({ key: Buffer.concat([ED25519_PKCS8_SEED_PREFIX, privateSeed]), format: "der", type: "pkcs8" });
   const derivedPublic = Buffer.from(createPublicKey(privateObject).export({ format: "jwk" }).x!, "base64url");
   if (!timingSafeEqual(publicKey, derivedPublic))
     throw new Error("Goal Ed25519 host key public/private material does not match");
