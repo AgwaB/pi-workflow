@@ -20,6 +20,23 @@ function body(name) {
   assert.equal(matches.length, 1);
   return matches[0];
 }
+test('watchOriginalDurableTerminal within the outer deadline ends only by the test abort', async () => {
+  const emitter = new EventEmitter();
+  emitter.close = () => emitter.removeAllListeners();
+  const controller = new AbortController();
+  const fn = new Function('readRunRecord', 'watch', 'join', 'cwd', 't', 'testMs',
+    `${body('watchOriginalDurableTerminal')}; return watchOriginalDurableTerminal;`)(
+      async () => ({ status: 'running' }), () => emitter, join, '/fixture', { signal: controller.signal }, () => 50);
+  let outcome = 'pending';
+  const watching = fn('run', { executionWithinOuterDeadline: true }).then(
+    () => { outcome = 'resolved'; }, error => { outcome = error; });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(outcome, 'pending', 'no own 50 ms deadline');
+  controller.abort(new Error('test timeout'));
+  await watching;
+  assert.match(String(outcome), /test timeout/);
+  emitter.close();
+});
 for (const name of ['watchOriginalDurableTerminal', 'watchOriginalTerminalAndFeedback']) {
   test(`${name} rechecks an event received during a pending read`, async () => {
     const emitter = new EventEmitter();
