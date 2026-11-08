@@ -8548,6 +8548,10 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         const held = new Promise(resolve => { release = resolve; });
         const started = new Promise(resolve => { entered = resolve; });
         commandContext.ui.select = async () => { entered(); return held; };
+        // Isolate the judgment: a scheduler refresh triggered by the tamper below
+        // could rewrite run.json (updatedAt only) or hold the run lease ("lease is
+        // busy" denial) and hide what this denied judgment itself wrote.
+        await stopWorkflowWatchersForTests([cwd]);
         const judging = invoke(`judge ${run.runId}`);
         await started;
         const path = rubric.endsWith("compiled") ? join(cwd, ".pi", "workflows", run.runId, "compiled.json") :
@@ -10595,7 +10599,16 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       if (foreachParentReentryStop) {
         releaseParentPrepare();
         const decision = await joinStop("original-parent-policy-stop-decision", parentStopDecision);
-        assert.equal(decision.child.status, "running", "the original child callback is still held, not terminal");
+        // Usually the child is still held here. Under load the stop cascade, which
+        // stops descendants before the root decision is published, may already have
+        // interrupted it; then only an exact acknowledged cancellation is accepted.
+        if (decision.child.status === "interrupted") {
+          const stopped = decision.child.tasks.find(task => task.taskId === stoppedChild.taskId);
+          assert.equal(stopped?.status, "interrupted", JSON.stringify(decision.child));
+          assert.equal(stopped.statusDetail, "workflow_stopped");
+          assert.equal(stopped.durableLaunchBarrier?.records.at(-1)?.phase, "cancellation_acknowledged",
+            "an early child terminal state still requires the exact backend cancellation acknowledgement");
+        } else assert.equal(decision.child.status, "running", "the original child callback is still held, not terminal");
         assert.equal(decision.root.status, "running", "a stopped Goal policy must await its original descendant cancellation");
         assert.equal(decision.root.tasks.find(task => task.kind === "goal").statusDetail, "cancellation_pending");
       }
@@ -17718,6 +17731,9 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
       assert.match(paused, /UNKNOWN|unsettled/i, "sent unanswered cancellation cannot claim known settlement");
       await joinWarm("original-unknown-native-callback-join", nativeCallbacks.get(held.runId).settled);
       assert.equal(nativeCallbacks.get(held.runId).abortObserved, true);
+      // Isolate the resume denial from background scheduler refreshes, which can
+      // rewrite a family run.json (updatedAt) between the two byte snapshots.
+      await stopWorkflowWatchersForTests([cwd]);
       const before = await listRunRecords(cwd);
       const files = await Promise.all(before.map(record => readFile(join(cwd, ".pi", "workflows", record.runId, "run.json"))));
       const retainedStop = await readWorkflowStopIntent(cwd, root.runId);
