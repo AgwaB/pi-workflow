@@ -174,6 +174,12 @@ export async function openGoalAuthenticatedLocalChannel(input: {
   socketPath: string; attemptKey: string; stopped: AbortSignal; requestLimit?: number;
   onRequest(payload: Json, peer: GoalAuthenticatedLocalPeer): Promise<Json>;
   onAcknowledged(payload: Json, result: Json, peer: GoalAuthenticatedLocalPeer): Promise<Json>;
+  /**
+   * A request refused because the channel is draining (for example its Goal is
+   * stopping) fails its client as before, but the drain treats it as settled
+   * instead of failing. The owner's own accounting still decides UNKNOWN.
+   */
+  drainTolerates?(error: unknown): boolean;
   onDisconnect?(peer: GoalAuthenticatedLocalPeer): Promise<void> | void;
 }): Promise<GoalAuthenticatedLocalServer> {
   const hostKey = generateGoalAuthenticatedLocalHostKey();
@@ -227,7 +233,10 @@ export async function openGoalAuthenticatedLocalChannel(input: {
               const identity = { version: 1 as const, attemptKey: descriptor.attemptKey, channelId: descriptor.channelId, operationId, fingerprint, nonce };
               inFlight.add(connection);
               const requestWork = Promise.resolve().then(() => input.onRequest(request.payload, peer));
-              track(requestWork);
+              track(input.drainTolerates ? requestWork.catch(error => {
+                if (closed && input.drainTolerates!(error)) return;
+                throw error;
+              }) : requestWork);
               const result = await timed(() => requestWork, input.stopped);
               channel.write(encode(descriptor, operationId, fingerprint, nonce, "result", result, GOAL_AUTHENTICATED_RESPONSE_LIMIT));
               const ack = parse(await active(frames, input.stopped), DEFAULT_LIMIT + FRAME_OVERHEAD, { ...identity, phase: "ack" }, ["resultDigest"]);

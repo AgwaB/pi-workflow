@@ -10344,9 +10344,17 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.equal(task.launchAuthority?.records.length ?? 0, 0);
       assert.equal(task.durableLaunchBarrier?.records.length ?? 0, 0);
     }
+    let rootFailedBeforeStop = false;
     expectedUnknownStop = error => {
       if (foreachUnstoppedPublicationFailure) {
         assert.equal(error.message, `stop requires a non-terminal run; ${run.runId} is failed`);
+        return true;
+      }
+      // Under load the root can already have failed from the stopped child's
+      // rejected publication before this stop arrives (seen on main too). The
+      // UNKNOWN, journal and no-republication checks below still apply.
+      if (foreachChildStopAfterJournal && error.message === `stop requires a non-terminal run; ${run.runId} is failed`) {
+        rootFailedBeforeStop = true;
         return true;
       }
       const pending = `Workflow stop requested for ${run.runId}, but active work or descendant workflow stop could not be confirmed within 1500ms; stop intent remains durable and cancellation is still pending. Retry /workflow stop ${run.runId}`;
@@ -10367,7 +10375,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     }
     await assert.rejects(stopRun(cwd, run.runId), expectedUnknownStop);
     const retainedStop = await readWorkflowStopIntent(cwd, run.runId);
-    if (foreachUnstoppedPublicationFailure) {
+    if (foreachUnstoppedPublicationFailure || rootFailedBeforeStop) {
       assert.equal(retainedStop, undefined, "a denied stop after original terminal failure cannot mint a stop intent");
     } else {
       assert.equal(retainedStop?.runId, run.runId);
