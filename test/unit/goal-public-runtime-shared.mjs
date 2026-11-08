@@ -9310,7 +9310,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
         else {
           assert.equal(reply, registeredTerminalMessage("resume", "running"),
             "same-live-session recovery returns the registered running response before original terminal publication");
-          run = await joinPipeline("pending-recovery-terminal-state", watchOriginalDurableTerminal(run.runId));
+          run = await joinPipeline("pending-recovery-terminal-state",
+            watchOriginalDurableTerminal(run.runId, { executionWithinOuterDeadline: true }));
           await joinPipeline("pending-recovery-feedback-drain", stopWorkflowFeedbackAndDrainForTests(cwd, run.runId));
           recoveryFeedbackDrained = true;
           notice = terminalNotifications.findLast(({ message, level }) => level === "info" &&
@@ -9623,7 +9624,8 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       else {
         assert.equal(resumeReply, registeredTerminalMessage("resume", "running"),
           "registered root resume returns its exact running response before terminal publication");
-        run = await joinPipeline("terminal-recovery-state", watchOriginalDurableTerminal(run.runId));
+        run = await joinPipeline("terminal-recovery-state",
+          watchOriginalDurableTerminal(run.runId, { executionWithinOuterDeadline: true }));
         await joinPipeline("recovery-feedback-observer-drain", stopWorkflowFeedbackAndDrainForTests(cwd, run.runId));
         recoveryFeedbackDrained = true;
         recoveryNotice = terminalNotifications.findLast(({ message, level }) => level === "info" &&
@@ -11482,8 +11484,10 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     }
     assert.equal(confirmations, 1, "resume never re-confirms or re-captures");
   }
-  function watchOriginalDurableTerminal(originalRunId) {
+  function watchOriginalDurableTerminal(originalRunId, { executionWithinOuterDeadline = false } = {}) {
     return new Promise((resolveRun, rejectRun) => {
+    // With executionWithinOuterDeadline only the test's own timeout bounds the
+    // wait (its abort signal ends it); use it only in tests that set a timeout.
     const deadline = Date.now() + testMs(20_000);
     let watcher;
     let timer;
@@ -11526,9 +11530,10 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     // 18 s); a coalesced periodic re-read keeps the same deadline and contract.
     poll = setInterval(() => { void inspect(); }, 100);
     t.signal.addEventListener("abort", abort, { once: true });
-    timer = setTimeout(() => finish(new Error(`original durable run did not terminate within ${testMs(20_000)}ms: ${originalRunId}` +
-      (partialRead ? `; last unreadable run record: ${partialRead.message}` : ""))),
-      Math.max(0, deadline - Date.now()));
+    if (!executionWithinOuterDeadline)
+      timer = setTimeout(() => finish(new Error(`original durable run did not terminate within ${testMs(20_000)}ms: ${originalRunId}` +
+        (partialRead ? `; last unreadable run record: ${partialRead.message}` : ""))),
+        Math.max(0, deadline - Date.now()));
     if (t.signal.aborted) abort(); else void inspect();
     });
   }
@@ -11737,13 +11742,15 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       else t.signal.addEventListener("abort", abortRubric, { once: true });
     });
     try {
-      // Real native execution uses the existing whole-test deadline. Its
-      // separate 20 s notice budget starts only at observed durable terminal;
-      // both phases remain capped by that unchanged outer deadline.
+      // Execution uses the existing whole-test deadline (90 s). The separate
+      // 20 s notice budget starts only at observed durable terminal; both phases
+      // remain capped by that unchanged outer deadline. A 20 s budget from watch
+      // start ran out under parallel load while the run was still progressing
+      // (8 of 10 concurrent copies; all reached terminal ~2 s after it).
       // Never stop engine watchers while native execution is still active.
       const { run: terminalRun, notice } = await Promise.race([
         watchOriginalTerminalAndFeedback(run.runId, pipelineFeedback,
-          { executionWithinOuterDeadline: nativeSourceComplete }),
+          { executionWithinOuterDeadline: true }),
         rubricFixtureFailure.promise, cancelled,
       ]);
       assert.equal(terminalRun.runId, run.runId);
