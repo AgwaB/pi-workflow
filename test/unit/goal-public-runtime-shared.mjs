@@ -2662,7 +2662,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
   const cwd = await realpath(await mkdtemp(join(closure ? dirname(process.env.PIWF_TEST_ORDINARY_CLOSURE_RECEIPT) : tmpdir(), "goal-coding-callback-")));
   const goalFence = goalSessionFence(t);
   let run, closureReceipt, childStartedResolve, releaseChild, stoppedChild, lateChildSend, lateChildRejection;
-  let observeOriginalChildStop, retainedOriginalChildStop;
+  let observeOriginalChildStop, retainedOriginalChildStop, awaitOriginalChildFence, retainedOriginalRootStop;
   let observeParentGoalReentry;
   let backendLateUnknownEvidence, backendLateFirstRequest, backendLateHookError, backendLateSecondHookEntered = false;
   const backendLateFirstResponse = Promise.withResolvers();
@@ -6995,9 +6995,12 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
           assert.equal(result.stopReason, "error", "original stop denies held native child request");
           assert.equal(budgetPhysicalRequests, foreachActiveStop ? foreachPresendPhysicalRequests : 1, "no physical child transmission after published stop");
           const { readWorkflowStopIntent } = await import("../../.tmp/unit/store.js");
-          const originalStop = await readWorkflowStopIntent(cwd, durable.parentRunId);
+          // A stop that already finished (its backend acknowledged the cancellation)
+          // has cleared its intent; the test retained that published intent.
+          const originalStop = await readWorkflowStopIntent(cwd, durable.parentRunId) ?? retainedOriginalRootStop;
           assert.equal(originalStop?.runId, durable.parentRunId, "generic callback rejection follows original ancestor stop");
           assert.equal(originalStop.reason, "user");
+          if (foreachActiveStop && !retainedOriginalChildStop) await awaitOriginalChildFence();
           const childStop = foreachActiveStop && retainedOriginalChildStop || await readWorkflowStopIntent(cwd, durable.runId);
           if (foreachActiveStop) {
             assert.ok(childStop, "warm callback rejection follows the original published child fence");
@@ -10518,6 +10521,10 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       const persistedLateOutcome = new Promise(resolve => { lateOutcomeResolve = resolve; });
       let childFenceResolve;
       const publishedChildFence = new Promise(resolve => { childFenceResolve = resolve; });
+      // The held child's rejected callback may run before the stop cascade
+      // publishes the child fence; the fence is still published before the stop
+      // can finish, so the callback waits for it (bounded by the test).
+      awaitOriginalChildFence = () => Promise.race([publishedChildFence, cancelled]);
       observeOriginalChildStop = intent => {
         assert.ok(intent, "retain an actual original child stop read before retirement");
         assert.equal(intent.schemaVersion, 1);
@@ -10548,6 +10555,11 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       syncBuiltinESMExports();
       setRunLeaseTestHooksForTests({ async onBeforeExclusiveLink({ file }) {
         if (file === childIntentFile && !foreachActiveStop) await Promise.race([persistedLateOutcome, cancelled]);
+      }, async onAfterStopIntentWrite({ file }) {
+        // The fence is also observed at its publication: a fast stop can finish
+        // and clear it before the held callback's rejection reads it back.
+        if (file === childIntentFile && foreachActiveStop)
+          observeOriginalChildStop(JSON.parse((await originalStopReadFile(file)).toString()));
       }, async onAfterAtomicRename({ file }) {
         if (file === childRunFile || file === rootRunFile) {
           const observed = await readRunRecord(cwd, file === rootRunFile ? run.runId : active.runId);
@@ -10604,6 +10616,7 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       assert.equal(rootIntent.runId, run.runId);
       assert.equal(rootIntent.reason, "user");
       intents.set(rootIntent.runId, rootIntent);
+      retainedOriginalRootStop = rootIntent;
       if (foreachParentReentryStop) {
         releaseParentPrepare();
         const decision = await joinStop("original-parent-policy-stop-decision", parentStopDecision);
@@ -10622,6 +10635,24 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
       }
       releaseChild();
       if (foreachActiveStop) await joinStop("original-child-stop-intent-publication", publishedChildFence);
+      // Usually the rejected late send makes the child publish its interrupted
+      // producer. A stop that finished first (its backend acknowledged the
+      // cancellation) has already published it; then that record, together with
+      // the observed rejection of the late send, is the outcome.
+      void (async () => {
+        while (!lateOutcome && !t.signal.aborted) {
+          if (lateChildRejection) {
+            const current = await readRunRecord(cwd, active.runId);
+            const producer = current.tasks.find(task => task.taskId === stoppedChild.taskId);
+            if (!lateOutcome && ["interrupted", "failed"].includes(producer?.status)) {
+              lateOutcome = current;
+              lateOutcomeResolve();
+              return;
+            }
+          }
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+      })().catch(() => undefined);
       await joinStop(foreachWarm ? "late-generic-launch-outcome-after-child-fence" :
         "late-generic-launch-outcome-before-child-fence", persistedLateOutcome);
       const lateProducer = lateOutcome.tasks.find(task => task.taskId === stoppedChild.taskId);
