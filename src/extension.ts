@@ -175,6 +175,31 @@ const activeWorkflowUiTimers = new Map<
 	string,
 	ReturnType<typeof setInterval>
 >();
+// Fire-and-forget active-UI refreshes per cwd. They read the fresh index,
+// which may rewrite `.pi/workflows/index.json`; test teardown joins them
+// before removing an isolated cwd.
+const activeWorkflowUiWork = new Map<string, Set<Promise<unknown>>>();
+
+function trackActiveWorkflowUiWork(cwd: string, work: Promise<unknown>): void {
+	const set = activeWorkflowUiWork.get(cwd) ?? new Set();
+	activeWorkflowUiWork.set(cwd, set);
+	set.add(work);
+	void work.finally(() => {
+		set.delete(work);
+		if (set.size === 0 && activeWorkflowUiWork.get(cwd) === set)
+			activeWorkflowUiWork.delete(cwd);
+	});
+}
+
+/** Stop the active-UI poll for `cwd` and join its in-flight refreshes. */
+export async function stopActiveWorkflowUiForTests(cwd: string): Promise<void> {
+	clearActiveWorkflowUiTimerForCwd(cwd);
+	for (;;) {
+		const pending = [...(activeWorkflowUiWork.get(cwd) ?? [])];
+		if (pending.length === 0) return;
+		await Promise.allSettled(pending);
+	}
+}
 const workflowUiSessionControllers = new Map<string, AbortController>();
 
 export const WORKFLOW_LIST_TOOL = "workflow_list" as const;
@@ -1129,7 +1154,10 @@ function startActiveWorkflowUiPolling(
 			clearActiveWorkflowUiTimerForCwd(ctx.cwd, timer);
 			return;
 		}
-		void restoreActiveWorkflowUi(ctx, api, signal).catch(() => undefined);
+		trackActiveWorkflowUiWork(
+			ctx.cwd,
+			restoreActiveWorkflowUi(ctx, api, signal).catch(() => undefined),
+		);
 	}, RUN_FEEDBACK_POLL_MS);
 	timer.unref?.();
 	activeWorkflowUiTimers.set(ctx.cwd, timer);
@@ -1313,7 +1341,10 @@ async function startWorkflowParentTracking(
 	signal: AbortSignal,
 	bindWaitMs = 0,
 ): Promise<boolean> {
-	void refreshActiveWorkflowUi(ctx, signal).catch(() => undefined);
+	trackActiveWorkflowUiWork(
+		ctx.cwd,
+		refreshActiveWorkflowUi(ctx, signal).catch(() => undefined),
+	);
 	if (
 		!(await bindWorkflowFeedbackAudience(ctx, runId, bindWaitMs, signal)) ||
 		signal.aborted

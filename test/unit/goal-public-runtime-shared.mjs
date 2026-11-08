@@ -68,6 +68,7 @@ import workflowExtension, {
   WORKFLOW_RUN_TOOL,
   WORKFLOW_WAIT_TOOL,
   stopWorkflowFeedbackAndDrainForTests,
+  stopActiveWorkflowUiForTests,
   watchWorkflowFeedbackForTests,
 } from "../../.tmp/unit/extension.js";
 import { GoalHostJournal } from "../../.tmp/unit/goal-host-journal.js";
@@ -2920,6 +2921,9 @@ for (const [uncertain, custom, warm, evidenceFailure, commandMode, requestBudget
     await joinAfterFailure(t, "watcher stop", stopWorkflowWatchersForTests([cwd]));
     await joinAfterFailure(t, "final native callback join", joinNativeCallbacks());
     await joinAfterFailure(t, "final watcher stop", stopWorkflowWatchersForTests([cwd]));
+    // The extension's active-UI poll (started by its session_start) refreshes
+    // the index; join it before the index flush and the cwd removal.
+    await joinAfterFailure(t, "active UI stop", stopActiveWorkflowUiForTests(cwd));
     setRunLeaseTestHooksForTests(); setSubagentApiForTests(undefined);
     await flushPendingIndexUpdatesForTests();
     if (t.passed === true && stopSettled && !closureReceipt && !expectedUnknownStop &&
@@ -16957,6 +16961,7 @@ for (const [name, cap, expected, recursive, terminalFault, mixed, depthDenied, g
     await joinWarm("cleanup-feedback-and-watcher-stop", (async () => {
       if (root) await stopWorkflowFeedbackAndDrainForTests(cwd, root.runId);
       await stopWorkflowWatchersForTests([cwd]);
+      await stopActiveWorkflowUiForTests(cwd);
     })());
     await joinWarm("cleanup-final-native-and-index-drain",
       Promise.all([...nativeCallbacks.values()].map(callback => callback.settled))
