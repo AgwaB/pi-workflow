@@ -10,6 +10,7 @@ import type { GoalCandidateSourceReadContinuation, GoalCandidateSourceReadReceip
 import { GOAL_MAX_BYTES, goalHash, goalJson } from "./goal-json.js";
 import { goalFileContentIdentity, goalFileValueCheck, goalWorkspacePathCheck, type GoalWorkspacePath } from "./goal-workspace.js";
 import { writeJsonExclusive, writeJsonAtomicDurable, syncFileAndDirectory, outsideRunLeaseContext } from "./store.js";
+import { isWorkflowStopRequestedError } from "./workflow-stop.js";
 import { createAssistantMessageEventStream, type Provider } from "@earendil-works/pi-ai";
 import { exchangeGoalAuthenticatedLocalChannel, openGoalAuthenticatedLocalChannel, openGoalAuthenticatedLocalSession,
   GOAL_AUTHENTICATED_ACTIVE_TIMEOUT, GOAL_AUTHENTICATED_RESPONSE_LIMIT, goalAuthenticatedRequestWasSent,
@@ -1795,6 +1796,11 @@ export async function openGoalRequestBudgetChannel(input: {
       return { status: "acknowledged" };
     },
     onDisconnect(peer) { return input.budget.disconnect(peer); },
+    // A request that arrives as the Goal stops, or while this channel drains, is
+    // refused by the stop or the retirement. That must not fail a stop cleanup's
+    // drain; whether anything stays UNKNOWN is decided by assertSettled below.
+    drainTolerates: error => isWorkflowStopRequestedError(error) ||
+      error instanceof Error && error.message === "Goal request channel retired",
   }));
   requestChannelId = server.channelId;
   const channel = Object.freeze({ socketPath: server.socketPath, attemptKey: server.attemptKey, channelId: server.channelId,
