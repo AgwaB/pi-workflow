@@ -42,6 +42,7 @@ Copy their proven conventions (see "Quality design patterns"), not just their st
 - Agent-declared tools are the authority ceiling; workflow `tools` can only narrow them.
 - To reuse agent knowledge across stages, declare top-level `roles` (`fromAgent` extracts safe agent sections; `prompt` appends literal text). Compiled role text is injected as a `# Role Context` block; check the result with `/workflow roles <workflow>`. See "Roles" in `docs/usage.md`.
 - Independently classify every model-backed stage with `profileRole`: `planning`, `research-execution`, `synthesis`, `verification`, or `final-judgment`. This is required for Codex/Codex High/Claude/Mixed/Custom user profile coverage and must reflect the work's semantic purpose, never a stage-name guess. Put it on `single`/`foreach`/`reduce`/`dynamic` stages, nested DAG/loop children, and model-backed `onExhausted`; a dynamic stage's role classifies its generated-agent runtime defaults, and each present decision-loop `planner`/`workerDefaults`/`verifier`/`synthesis` profile object also needs its own role. Do not put it on support or DAG/loop containers. `profileRole` is not the agent-context `role` field.
+- For extension-defined models, check child provider registration separately from parent model availability. Follow [Extension-defined models](../../docs/usage.md#extension-defined-models) for explicit forwarding, process-wide scope, trust, and Goal exclusions; do not invent an `extensions` workflow spec field or inherit all parent extensions. Static validation does not prove child model availability; get authorization before any provider-backed check.
 - Keep review/research workflows read-only unless the workflow explicitly documents managed-worktree mutation.
 - Write-capable workflows need explicit worktree policy, validation/check stages, and protected-path awareness.
 - In non-git workspaces with `worktreePolicy: "off"`, writes mutate the live directory.
@@ -267,6 +268,7 @@ Before handing off or recommending a reusable workflow run, verify or report as 
 
 - `/workflow validate <workflow-or-file>` result and all warnings.
 - Required agents exist and their declared tool ceilings allow the workflow tools.
+- For extension-defined models, the trusted provider entry and child loading requirements are accounted for under [Extension-defined models](../../docs/usage.md#extension-defined-models); parent model visibility or a valid spec alone is not sufficient. Report runtime verification as not run unless it was actually performed.
 - `readOnly` and tool lists match the intended side-effect policy.
 - Every `single.from`, `foreach.from`, `reduce.from`, support `from`, and `dag.outputFrom` reference resolves.
 - Every downstream-consumed control field has a schema and a bounded prompt contract.
