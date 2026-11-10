@@ -62,6 +62,11 @@ export async function ensureManagedWorktree(
 
 	const path = managedWorktreePath(projectCwd, run.runId, task.taskId);
 	const branch = `pi-workflow/${run.runId}-${task.taskId}`;
+	if ((await exists(path)) && (await isInsideRealPath(path, gitRoot))) {
+		throw new Error(
+			`managed worktree source ${gitRoot} must not be inside its managed destination ${path}`,
+		);
+	}
 	await mkdir(dirname(path), { recursive: true });
 
 	const snapshot = await captureDirtyWorktreeSnapshot(

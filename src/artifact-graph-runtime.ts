@@ -1088,6 +1088,9 @@ export async function prepareDagTask(
 	const canonical = workflowTaskProfileBinding(sourceTask);
 	const compiledTask = prepareWorkflowNativeTaskPolicy(sourceTask, run.nativeHost);
 	const seal = (prepared: CompiledTask): CompiledTask => {
+		// Preparation may copy task.cwd from an earlier managed attempt.
+		if (prepared.safety.requiresWorktree)
+			prepared = { ...prepared, cwd: compiledTask.cwd };
 		if (workflowTaskProfileBinding(sourceTask) !== canonical)
 			throw new Error("Canonical task profile changed during launch preparation");
 		preparedTaskProfiles.set(prepared, { source: sourceTask, canonical, launch: workflowTaskProfileBinding(prepared) });
@@ -2050,7 +2053,8 @@ export async function prepareArtifactGraphRetryTask(
 		"(empty or unavailable)";
 	const retryTask = {
 		...preparedTask,
-		cwd: task.cwd,
+		// Worktree provisioning needs the source cwd, not the prior destination.
+		cwd: preparedTask.safety.requiresWorktree ? preparedTask.cwd : task.cwd,
 		compiledPrompt: [...retrySections, preview].join("\n\n"),
 	};
 	assertFinalCompiledPromptWithinCap(retryTask);
