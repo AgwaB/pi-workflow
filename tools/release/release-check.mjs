@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 
+import { findSecretLikeText } from "./package-text-scan.mjs";
 import { isRegistryFreeValidationOnly } from "./release-policy.mjs";
 import { assertPackedTypeScriptClosure } from "./typescript-package-closure.mjs";
 
@@ -72,8 +73,6 @@ const FORBIDDEN_PACKAGE_PREFIXES = [
 ];
 
 const FORBIDDEN_CANDIDATE_PATTERN = /workflows\/(?:deep-research\/batched-verification|deep-review\/batched-devil-advocate|spec-review\/batched-verification)\.spec\.json|deep-research-batched-verification-opt-in|deep-review-batched-devil-advocate-opt-in|spec-review-batched-verification-opt-in|batch-verification-candidates\.mjs|deep-research-verify-claims-batch-control\.schema\.json|deep-review-devil-advocate-batch-control\.schema\.json|spec-review-verify-findings-batch-control\.schema\.json|PI_WORKFLOW_CAMPAIGN/;
-
-const SECRET_PATTERN = /\/Users\/toby|\/var\/folders|Desktop|clipboard|Screenshot|API[_-]?KEY|SECRET|PASSWORD|PRIVATE KEY|BEGIN [A-Z ]*PRIVATE KEY|npm_[A-Za-z0-9]{20,}|(^|[^a-zA-Z])sk-[A-Za-z0-9]{20,}/;
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
 const NPM_DIST_TAG = "latest";
@@ -299,9 +298,9 @@ const ownTextFiles = files.filter(
 		existsSync(path),
 );
 for (const path of ownTextFiles) {
-	const text = readFileSync(path, "utf8");
-	if (SECRET_PATTERN.test(text)) {
-		console.error(`Package file contains local path or secret-like text: ${path}`);
+	const match = findSecretLikeText(path, readFileSync(path, "utf8"));
+	if (match !== undefined) {
+		console.error(`Package file contains local path or secret-like text: ${path} (${match})`);
 		process.exit(1);
 	}
 }
