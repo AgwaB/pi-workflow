@@ -95,6 +95,68 @@ import { listWorkflows, resolveWorkflowRef } from "@agwab/pi-workflow";
 
 Do not import private `src/`, `dist/`, or bundled workflow helper paths directly; those paths are package internals except for the documented `./extension` Pi entrypoint.
 
+## Extension-defined models
+
+Workflow workers are separate Pi processes. Selecting a model through the parent
+session, a workflow default, or an execution profile does not transfer the
+parent's `pi.registerProvider()` registrations. **Parent model availability does
+not prove child model availability.** A worker does not automatically inherit all
+parent extensions: the bundled engine disables ambient extension discovery and
+loads the workflow's explicit extension list instead.
+
+For ordinary workflow workers, explicitly forward a required provider extension
+with `PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS`. Set it before starting Pi and any
+supervisors; setting it in a shell does not change an already-running Pi process:
+
+```sh
+PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS="/absolute/path/to/provider-extension.ts" pi
+```
+
+Use absolute paths to trusted, installed extension entry files that remain
+readable from the child process. On macOS/Linux, separate multiple paths with
+`:`. This is a process-wide setting: it applies to ordinary workers launched from
+that Pi/supervisor, not just one workflow or stage. Leave it unset when no extra
+provider extension is needed. Existing workflow extensions remain enabled;
+forwarding this entry does not enable blanket parent-extension inheritance.
+
+This is not a workflow spec field. Do not add a top-level `extensions` property or
+put it in `executionProfiles`; profiles select models, not extension code. Object
+`tools[].extensions` metadata is for tool providers, not a general model-provider
+setting. Models configured only through Pi's `models.json` are a separate setup
+path; this section concerns providers registered by extensions.
+
+**Trust and scope.** Extensions are trusted executable code, not sandboxed model
+configuration. Their factories may run during parent preflight as well as child
+startup. Load only the provider entry files you intend to trust; do not forward
+all installed extensions or disable extension isolation to fix a missing model.
+Forwarding does not supply authentication, guarantee third-party headless
+compatibility, or widen workflow tool authority. The provider must register the
+selected model before the child selects it. **Goal candidate/request channels**
+keep only their admitted channel extensions and an optional Fast hook; this
+setting does not add provider extensions to those launches or widen Goal model
+support.
+
+### Diagnose an extension-defined model that is missing in a child
+
+If the worker reports `Model "<provider>/<model>" not found` while the parent can
+select it:
+
+1. Confirm the exact provider/model ID and which extension registers it; parent
+   installation alone is not proof that the child loaded that extension.
+2. Check the trusted entry-file path and explicit forwarding setting, then
+   restart Pi/supervisors with the intended environment. If the extension loads
+   but the model is still absent, check its registration timing and headless Pi
+   compatibility. Do not silently substitute a different model.
+3. Inspect the stored worker stderr using the [failed-run diagnosis](#diagnose-a-failed-run)
+   guidance. The existing model-failure retry policy may repeat a missing-model
+   error; retrying without correcting registration will not make the model
+   available. Sanitize credentials and provider payloads before sharing logs.
+
+`/workflow validate` is static validation: it does not prove child provider
+registration, authentication, network access, quota, or model output quality.
+When runtime verification is needed, use a bounded check with the intended child
+model only after the user has authorized any provider requests.
+
 ## Command surface
 
 Pi command:
@@ -1094,11 +1156,12 @@ Set user controls before launching Pi/supervisors so their child processes inher
 | Classification | Variables and behavior |
 |---|---|
 | Supported configuration | `PI_CODING_AGENT_DIR`: Pi user configuration root, including workflow/agent discovery. `PI_WORKFLOW_STRICT_PROMPT_SCHEMA=1`: reject selected prompt/schema diagnostics before named-workflow launch (not direct dynamic); ordinary validation still applies. `PI_WORKFLOW_TOOL_EXPOSURE=deferred`: register the `workflow_*` tools with deferred exposure so they stay off every request until Pi's `tool_search` loads them (enable it with `"defaultTools": ["+tool_search"]`). |
+| Supported provider-extension configuration | `PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS`: process-wide explicit forwarding of trusted provider-extension entry files to ordinary workflow workers; see [Extension-defined models](#extension-defined-models) for setup, trust boundaries, and Goal channel exclusions. |
 | Supported cache/transcript controls | `PI_WORKFLOW_FETCH_CONTENT_CACHE=0`: disable the bundled legacy fetch cache (`PI_WORKFLOW_FETCH_CACHE` is a fallback alias when the primary variable is unset). `PI_WORKFLOW_FETCH_CONTENT_INLINE_CHARS`: inline legacy fetch cap, default `12000`, `0` disables. `PI_WORKFLOW_DYNAMIC_TOOL_RESULT_BUDGET_CHARS`: dynamic child transcript cap; see [telemetry](#dynamic-child-transcript-budget-telemetry). |
 | Supported operational limits | `PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES`: positive launch-gate override. `PI_WORKFLOW_MAX_LIVE_MODEL_WORKERS`: optional positive live-worker ceiling. `PI_WORKFLOW_TRANSIENT_MODEL_FAILURE_RETRIES` and `PI_WORKFLOW_ARTIFACT_OUTPUT_RETRIES`: non-negative retry limits, defaults `5` and `2`. Lower retries or higher concurrency are explicit reliability/quality trade-offs, not recommended speed defaults. |
 | Experimental, default off | `PI_WORKFLOW_EXPERIMENTAL_TOOL_DEDUP`, `PI_WORKFLOW_EXPERIMENTAL_CACHE_STABLE_FOREACH`, `PI_WORKFLOW_EXPERIMENTAL_LAUNCH_RAMP`, `PI_WORKFLOW_EXPERIMENTAL_SAME_SESSION_REPAIR`, `PI_WORKFLOW_PER_ITEM_DISPATCH`; additionally `PI_WORKFLOW_ADAPTIVE_LIVE_WORKERS` enables adaptive live-worker limits. Enable with `1`, `true`, `yes`, or `on` (case-insensitive). No general speed/quality claim is implied. |
 | Inactive experiment labels | `PI_WORKFLOW_CACHE_SHAPE_METRICS` and `PI_WORKFLOW_EXPERIMENTAL_DEPTH_ROUTER` do not enable runtime behavior. Provider cache usage is recorded when available without these flags. |
-| Internal/diagnostic, not public tuning contracts | `PI_WORKFLOW_ROLE` and parent-subagent context are runtime-owned. `PI_WORKFLOW_CAPTURE_TOOL_CALLS`, `PI_WORKFLOW_SUBAGENT_EXTRA_EXTENSIONS`, `PI_WORKFLOW_CONTAIN_DETACHED_SUPERVISOR`, and `PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS` are diagnostic/integration controls. Private runtime-artifact name/clone/copy controls belong to worktree implementation, not portable workflow specs. Leave internal controls unset unless an integration explicitly owns them. |
+| Internal/diagnostic, not public tuning contracts | `PI_WORKFLOW_ROLE` and parent-subagent context are runtime-owned. `PI_WORKFLOW_CAPTURE_TOOL_CALLS`, `PI_WORKFLOW_CONTAIN_DETACHED_SUPERVISOR`, and `PI_WORKFLOW_LAUNCH_SLOT_RELEASE_DELAY_MS` are diagnostic/integration controls. Private runtime-artifact name/clone/copy controls belong to worktree implementation, not portable workflow specs. Leave internal controls unset unless an integration explicitly owns them. |
 
 ### Execution profiles
 
@@ -1836,7 +1899,7 @@ Scope order is agent frontmatter fallback < `defaults.tools` < stage `tools`: th
 - Write-capable workflows should use managed worktrees in git repositories.
 - In non-git workspaces with `worktreePolicy: "off"`, writes mutate the live directory.
 - No backend fallback exists. The compiled backend/strategy is fixed for the run.
-- Subagent process launches are gated per Pi process to avoid boot storms: at most `max(2, floor(cpu cores / 2))` concurrent launches, overridable with the `PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES` environment variable. Queued tasks report a waiting message in their status. Deterministic boot failures (extension load or configuration errors) fail fast instead of consuming transient-failure retries.
+- Subagent process launches are gated per Pi process to avoid boot storms: at most `max(2, floor(cpu cores / 2))` concurrent launches, overridable with the `PI_WORKFLOW_MAX_CONCURRENT_LAUNCHES` environment variable. Queued tasks report a waiting message in their status. Deterministic boot failures detected by extension preflight fail fast instead of consuming transient-failure retries; a child-side missing-model error may still follow the existing model-failure retry policy.
 - External content, source files, and web pages used by workflow workers are untrusted data, not instructions.
 
 ### Durable launch and batch controls
